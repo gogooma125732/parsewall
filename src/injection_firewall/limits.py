@@ -12,6 +12,7 @@ class ScanLimits:
     max_container_depth: int = 8
     max_container_member_bytes: int = 1 * 1024 * 1024
     max_container_uncompressed_bytes: int = 100 * 1024 * 1024
+    max_container_directory_bytes: int = 4 * 1024 * 1024
     max_pages: int = 10_000
     max_pixels: int = 100_000_000
     max_seconds: float = 30.0
@@ -23,6 +24,7 @@ class ScanLimits:
             or self.max_container_depth < 1
             or self.max_container_member_bytes < 1
             or self.max_container_uncompressed_bytes < 1
+            or self.max_container_directory_bytes < 1
             or self.max_pages < 1
             or self.max_pixels < 1
             or self.max_seconds <= 0

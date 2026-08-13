@@ -7,7 +7,7 @@ name = "document-injection-firewall"
 version = "0.1.0"
 description = "Closed result contract for document injection scanning"
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2.0"]
+dependencies = ["defusedxml>=0.7.1", "pydantic>=2.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/injection_firewall"]

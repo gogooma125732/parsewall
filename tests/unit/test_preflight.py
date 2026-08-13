@@ -1,4 +1,6 @@
 import hashlib
+import os
+import struct
 import zipfile
 from pathlib import Path
 
@@ -6,7 +8,14 @@ import pytest
 
 from injection_firewall.contract import EvidenceCode, RiskLevel
 from injection_firewall.limits import ScanLimits
-from injection_firewall.preflight import DocumentFormat, inspect_source
+from injection_firewall.preflight import DocumentFormat, inspect_source, verify_source
+
+WORD_TYPES = (
+    b'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    b'<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-'
+    b'officedocument.wordprocessingml.document.main+xml"/>'
+    b"</Types>"
+)
 
 
 def risk_rank(level: RiskLevel) -> int:
@@ -79,8 +88,7 @@ def test_docx_subtype_is_identified_from_bounded_content_types_metadata(tmp_path
     with zipfile.ZipFile(source, "w") as archive:
         archive.writestr(
             "[Content_Types].xml",
-            b'<Types><Override ContentType="application/vnd.openxmlformats-'
-            b'officedocument.wordprocessingml.document.main+xml"/></Types>',
+            WORD_TYPES,
         )
         archive.writestr("word/document.xml", b"<document/>")
 
@@ -110,3 +118,216 @@ def test_container_member_limit_is_enforced_from_zip_metadata(tmp_path: Path):
     report = inspect_source(source, ScanLimits(max_container_members=1))
 
     assert report.findings[0].evidence is EvidenceCode.RESOURCE_LIMIT_EXCEEDED
+
+
+def write_docx(source: Path, content_types: bytes, *members: tuple[str, bytes]) -> None:
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        for name, contents in members:
+            archive.writestr(name, contents)
+
+
+def test_symlink_is_rejected_without_following_target(tmp_path: Path):
+    target = tmp_path / "target.txt"
+    target.write_text("safe", encoding="utf-8")
+    source = tmp_path / "link.txt"
+    source.symlink_to(target)
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.sha256 == ""
+    assert report.findings[0].evidence is EvidenceCode.RESOURCE_LIMIT_EXCEEDED
+
+
+def test_non_regular_source_is_rejected(tmp_path: Path):
+    report = inspect_source(tmp_path, ScanLimits())
+
+    assert report.sha256 == ""
+    assert report.findings[0].evidence is EvidenceCode.RESOURCE_LIMIT_EXCEEDED
+
+
+def test_path_substitution_before_open_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source = tmp_path / "source.txt"
+    target = tmp_path / "target.txt"
+    source.write_text("safe", encoding="utf-8")
+    target.write_text("attacker", encoding="utf-8")
+    original_open = os.open
+
+    def substitute_then_open(path: str | bytes | os.PathLike[str] | os.PathLike[bytes], flags: int) -> int:
+        if Path(path) == source:
+            os.replace(target, source)
+        return original_open(path, flags)
+
+    monkeypatch.setattr("injection_firewall.preflight.os.open", substitute_then_open)
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.sha256 == ""
+    assert report.findings[0].risk_level is RiskLevel.QUARANTINE
+
+
+def test_source_growth_during_copy_returns_no_partial_hash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source = tmp_path / "growth.txt"
+    source.write_bytes(b"x" * 32)
+    original_read = os.read
+    calls = 0
+
+    def grow_after_read(fd: int, size: int) -> bytes:
+        nonlocal calls
+        result = original_read(fd, size)
+        calls += 1
+        if calls == 1:
+            with source.open("ab") as writer:
+                writer.write(b"y")
+        return result
+
+    monkeypatch.setattr("injection_firewall.preflight.os.read", grow_after_read)
+
+    report = inspect_source(source, ScanLimits(max_upload_bytes=64))
+
+    assert report.sha256 == ""
+    assert report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
+
+
+def test_verified_source_parser_reads_the_immutable_snapshot(tmp_path: Path):
+    source = tmp_path / "snapshot.txt"
+    source.write_text("original", encoding="utf-8")
+
+    with verify_source(source, ScanLimits()) as verified:
+        source.write_text("changed!", encoding="utf-8")
+        with verified.open() as snapshot:
+            assert snapshot.read() == b"original"
+        assert verified.report.sha256 == hashlib.sha256(b"original").hexdigest()
+
+
+def test_verified_source_readers_are_read_only_and_independent(tmp_path: Path):
+    source = tmp_path / "readers.txt"
+    source.write_text("original", encoding="utf-8")
+
+    with verify_source(source, ScanLimits()) as verified, verified.open() as first, verified.open() as second:
+        assert first.read(1) == b"o"
+        assert second.read(1) == b"o"
+        with pytest.raises(OSError):
+            os.write(first.fileno(), b"!")
+
+
+def test_ordinary_oversized_zip_member_is_rejected(tmp_path: Path):
+    source = tmp_path / "oversized.docx"
+    write_docx(source, WORD_TYPES, ("word/document.xml", b"x" * 17))
+
+    report = inspect_source(source, ScanLimits(max_container_member_bytes=16))
+
+    assert report.findings[0].evidence is EvidenceCode.RESOURCE_LIMIT_EXCEEDED
+
+
+def test_zip_total_size_and_depth_are_rejected_from_metadata(tmp_path: Path):
+    total = tmp_path / "total.docx"
+    deep = tmp_path / "deep.docx"
+    write_docx(total, WORD_TYPES, ("word/document.xml", b"x" * 17))
+    write_docx(deep, WORD_TYPES, ("a/b/c/document.xml", b"x"))
+
+    total_report = inspect_source(total, ScanLimits(max_container_uncompressed_bytes=16))
+    deep_report = inspect_source(deep, ScanLimits(max_container_depth=2))
+
+    assert total_report.findings[0].evidence is EvidenceCode.RESOURCE_LIMIT_EXCEEDED
+    assert deep_report.findings[0].evidence is EvidenceCode.RESOURCE_LIMIT_EXCEEDED
+
+
+def test_zip_time_limit_is_closed_before_container_parser(tmp_path: Path):
+    source = tmp_path / "timeout.docx"
+    write_docx(source, WORD_TYPES, ("word/document.xml", b"x"))
+
+    report = inspect_source(source, ScanLimits(max_seconds=1e-12))
+
+    assert report.sha256 == ""
+    assert report.findings[0].evidence is EvidenceCode.RESOURCE_LIMIT_EXCEEDED
+
+
+def test_declared_central_directory_over_limit_is_rejected_before_zipfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "directory.docx"
+    write_docx(source, WORD_TYPES, ("word/document.xml", b"x"))
+    contents = bytearray(source.read_bytes())
+    eocd = contents.rfind(b"PK\x05\x06")
+    struct.pack_into("<L", contents, eocd + 12, 4097)
+    source.write_bytes(contents)
+
+    def must_not_construct_zipfile(*_: object, **__: object) -> None:
+        raise AssertionError("central-directory limit must run before ZipFile")
+
+    monkeypatch.setattr("injection_firewall.preflight.zipfile.ZipFile", must_not_construct_zipfile)
+
+    report = inspect_source(source, ScanLimits(max_container_directory_bytes=4096))
+
+    assert report.findings[0].evidence is EvidenceCode.RESOURCE_LIMIT_EXCEEDED
+
+
+@pytest.mark.parametrize("unsafe_name", ["../word/document.xml", "/word/document.xml"])
+def test_unsafe_zip_member_name_is_rejected(tmp_path: Path, unsafe_name: str):
+    source = tmp_path / "unsafe.docx"
+    write_docx(source, WORD_TYPES, (unsafe_name, b"x"), ("word/document.xml", b"x"))
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
+
+
+def test_symlink_zip_member_is_rejected(tmp_path: Path):
+    source = tmp_path / "symlink.docx"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("[Content_Types].xml", WORD_TYPES)
+        member = zipfile.ZipInfo("word/document.xml")
+        member.create_system = 3
+        member.external_attr = (0o120777 << 16)
+        archive.writestr(member, b"target")
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
+
+
+def test_duplicate_canonical_zip_member_is_rejected(tmp_path: Path):
+    source = tmp_path / "duplicate.docx"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("[Content_Types].xml", WORD_TYPES)
+        archive.writestr("word/document.xml", b"first")
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            archive.writestr("word/document.xml", b"second")
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
+
+
+def test_ooxml_content_type_in_comment_is_not_classified_as_docx(tmp_path: Path):
+    source = tmp_path / "comment.docx"
+    write_docx(
+        source,
+        b'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        b"<!-- wordprocessingml.document.main+xml -->"
+        b"</Types>",
+    )
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.format is DocumentFormat.ZIP
+    assert report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
+
+
+def test_declared_ooxml_main_part_must_exist(tmp_path: Path):
+    source = tmp_path / "missing-main.docx"
+    write_docx(source, WORD_TYPES)
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
+
+
+def test_ooxml_main_part_cannot_be_a_directory_entry(tmp_path: Path):
+    source = tmp_path / "directory-main.docx"
+    write_docx(source, WORD_TYPES, ("word/document.xml/", b""))
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
