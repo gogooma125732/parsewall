@@ -4,6 +4,7 @@ import base64
 import binascii
 import re
 import unicodedata
+from collections.abc import Callable
 
 from .contract import AnomalyCode, EvidenceCode, Finding, RiskLevel
 
@@ -12,6 +13,11 @@ _BIDI_CONTROLS = frozenset(
 )
 _ZERO_WIDTH = frozenset("\u200b\u200c\u200d\u2060\ufeff")
 _CONTROL_TRANSLATION = str.maketrans({character: None for character in _BIDI_CONTROLS | _ZERO_WIDTH})
+_ENCODED_ALPHABET = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-"
+)
+_ENCODED_MINIMUM = 80
+_ENCODED_DECODE_MAXIMUM = 8192
 
 INSTRUCTION_PATTERNS = (
     re.compile(r"\bignore\s+(?:(?:all|any)\s+)?(?:previous|prior|above)\s+(?:instructions?|directions?)\b"),
@@ -19,16 +25,30 @@ INSTRUCTION_PATTERNS = (
     re.compile(r"\b(?:reveal|show|print|exfiltrate)\s+(?:the\s+)?(?:system|developer)\s+(?:prompt|instructions?)\b"),
     re.compile(r"\byou\s+are\s+now\b"),
 )
-_BASE64_BLOCK = re.compile(r"(?<![A-Za-z0-9+/=])([A-Za-z0-9+/]{80,8192}={0,2})(?![A-Za-z0-9+/=])")
+
+
+def _check(check_deadline: Callable[[], None] | None) -> None:
+    if check_deadline is not None:
+        check_deadline()
 
 
 def strip_directional_controls(text: str) -> str:
-    """Make invisible directional and zero-width controls unavailable to derivatives."""
+    """Remove invisible directional and zero-width controls from derivatives."""
     return text.translate(_CONTROL_TRANSLATION)
 
 
+def normalize_visible_text(text: str) -> str:
+    """Normalize text while retaining ordinary tab and line-ending structure."""
+    normalized = strip_directional_controls(unicodedata.normalize("NFKC", text))
+    return "".join(
+        character
+        for character in normalized
+        if character in {"\t", "\n", "\r"} or unicodedata.category(character) not in {"Cc", "Cf"}
+    )
+
+
 def anomalies_in(text: str) -> tuple[AnomalyCode, ...]:
-    """Return closed anomaly codes for Unicode controls, never the source characters."""
+    """Return closed anomaly codes for registered Unicode controls."""
     anomalies: list[AnomalyCode] = []
     if any(character in _BIDI_CONTROLS for character in text):
         anomalies.append(AnomalyCode.BIDI_CONTROL_CHARACTERS)
@@ -37,39 +57,102 @@ def anomalies_in(text: str) -> tuple[AnomalyCode, ...]:
     return tuple(anomalies)
 
 
-def classify_instruction(text: str, *, hidden: bool, location: str) -> tuple[Finding, ...]:
-    """Classify instruction-like text after safe Unicode normalization."""
-    normalized = strip_directional_controls(unicodedata.normalize("NFKC", text).casefold())
-    if not any(pattern.search(normalized) for pattern in INSTRUCTION_PATTERNS):
-        return ()
-    return (
-        Finding(
-            RiskLevel.QUARANTINE if hidden else RiskLevel.REVIEW,
-            EvidenceCode.HIDDEN_INSTRUCTION_PATTERN
-            if hidden
-            else EvidenceCode.VISIBLE_INSTRUCTION_PATTERN,
-            location,
-            AnomalyCode.DOM_HIDDEN_CONTENT if hidden else None,
-        ),
+def has_disallowed_controls(text: str) -> bool:
+    """Find non-format C0/C1 and other forbidden controls without exposing them."""
+    return any(
+        character not in {"\t", "\n", "\r"}
+        and unicodedata.category(character) in {"Cc", "Cf"}
+        for character in text
     )
 
 
-def encoded_block_findings(text: str, *, location: str) -> tuple[Finding, ...]:
-    """Detect bounded base64 blocks, escalating those whose decoded view is instructional."""
+def classify_instruction(
+    text: str,
+    *,
+    hidden: bool,
+    location: str,
+    check_deadline: Callable[[], None] | None = None,
+) -> tuple[Finding, ...]:
+    """Classify instruction-like text after safe Unicode normalization."""
+    _check(check_deadline)
+    normalized = normalize_visible_text(text).casefold()
+    for pattern in INSTRUCTION_PATTERNS:
+        _check(check_deadline)
+        if pattern.search(normalized):
+            return (
+                Finding(
+                    RiskLevel.QUARANTINE if hidden else RiskLevel.REVIEW,
+                    EvidenceCode.HIDDEN_INSTRUCTION_PATTERN
+                    if hidden
+                    else EvidenceCode.VISIBLE_INSTRUCTION_PATTERN,
+                    location,
+                    AnomalyCode.DOM_HIDDEN_CONTENT if hidden else None,
+                ),
+            )
+    return ()
+
+
+def _decode_encoded_block(encoded: str) -> str | None:
+    compact = "".join(character for character in encoded if not character.isspace())
+    if len(compact) > _ENCODED_DECODE_MAXIMUM or len(compact) % 4 == 1:
+        return None
+    compact += "=" * (-len(compact) % 4)
+    try:
+        return base64.b64decode(compact, altchars=b"-_", validate=True).decode("utf-8", "strict")
+    except (binascii.Error, UnicodeDecodeError):
+        return None
+
+
+def encoded_block_findings(
+    text: str,
+    *,
+    location: str,
+    check_deadline: Callable[[], None] | None = None,
+) -> tuple[Finding, ...]:
+    """Flag long encoded-looking runs even when they are malformed or oversized."""
     findings: list[Finding] = []
-    for match in _BASE64_BLOCK.finditer(text):
-        encoded = match.group(1)
-        try:
-            decoded = base64.b64decode(encoded, validate=True).decode("utf-8", "strict")
-        except (binascii.Error, UnicodeDecodeError):
-            continue
-        instruction = classify_instruction(decoded, hidden=True, location=location)
+    candidate: list[str] = []
+    payload_length = 0
+
+    def flush() -> None:
+        nonlocal candidate, payload_length
+        if payload_length < _ENCODED_MINIMUM:
+            candidate = []
+            payload_length = 0
+            return
+        _check(check_deadline)
+        encoded = "".join(candidate)
+        decoded = _decode_encoded_block(encoded) if payload_length <= _ENCODED_DECODE_MAXIMUM else None
+        is_instruction = decoded is not None and bool(
+            classify_instruction(
+                decoded,
+                hidden=True,
+                location=location,
+                check_deadline=check_deadline,
+            )
+        )
         findings.append(
             Finding(
-                RiskLevel.QUARANTINE if instruction else RiskLevel.REVIEW,
+                RiskLevel.QUARANTINE if is_instruction else RiskLevel.REVIEW,
                 EvidenceCode.ENCODED_INSTRUCTION_PATTERN,
                 location,
                 AnomalyCode.LONG_ENCODED_BLOCK,
             )
         )
+        candidate = []
+        payload_length = 0
+
+    for index, character in enumerate(text):
+        if index % 256 == 0:
+            _check(check_deadline)
+        if character in _ENCODED_ALPHABET:
+            payload_length += 1
+            if len(candidate) < _ENCODED_DECODE_MAXIMUM:
+                candidate.append(character)
+        elif character in {"\n", "\r", "\t"} and payload_length:
+            if len(candidate) < _ENCODED_DECODE_MAXIMUM:
+                candidate.append(character)
+        else:
+            flush()
+    flush()
     return tuple(findings)

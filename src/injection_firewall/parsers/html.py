@@ -1,7 +1,11 @@
-"""Non-executing scanner and visible-text derivative for verified HTML."""
+"""Non-executing, fail-closed scanner and derivative for verified HTML."""
 
 import re
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
+from urllib.parse import urlsplit
+
+import tinycss2  # type: ignore[import-untyped]
 
 from ..contract import AnomalyCode, EvidenceCode, Finding, RiskLevel
 from ..limits import ScanLimits
@@ -9,49 +13,89 @@ from ..patterns import (
     anomalies_in,
     classify_instruction,
     encoded_block_findings,
-    strip_directional_controls,
+    has_disallowed_controls,
+    normalize_visible_text,
 )
 from ..policy import failure_finding, failure_kind_for_exception
 from ..preflight import VerifiedSource
-from .base import ParserOutput, read_verified_text
+from .base import Deadline, ParserOutput, read_verified_text
 
 _HTML_CHECK = "html-dom"
-_REMOVED_TAGS = frozenset({"script", "style", "iframe", "object", "embed"})
-_ACTIVE_TAGS = frozenset({"script", "iframe", "object", "embed"})
-_VOID_TAGS = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"})
-_EXTERNAL_ATTRIBUTES = frozenset({"action", "background", "cite", "data", "formaction", "href", "poster", "src"})
-_EXTERNAL_URL = re.compile(r"^\s*(?:https?:|ftp:|//)", re.IGNORECASE)
-_JAVASCRIPT_URL = re.compile(r"^\s*javascript:", re.IGNORECASE)
-_CSS_EXTERNAL_URL = re.compile(r"url\(\s*['\"]?\s*(?:https?:|ftp:|//)", re.IGNORECASE)
-_CSS_HIDDEN = re.compile(
-    r"(?:display\s*:\s*none\b|visibility\s*:\s*hidden\b|opacity\s*:\s*0(?:\D|$)|font-size\s*:\s*0(?:\D|$)|(?:left|right|top|bottom|text-indent)\s*:\s*-\s*(?:[1-9]\d*|0?\.\d+)(?:px|em|rem|%|vw|vh|pt)?)",
-    re.IGNORECASE,
+_REMOVED_TAGS = frozenset(
+    {"script", "style", "iframe", "object", "embed", "template", "noscript", "title"}
 )
-_CSS_RULE = re.compile(r"([^{}]{1,8192})\{([^{}]{0,8192})\}")
-_CSS_CLASS_SELECTOR = re.compile(r"\.([A-Za-z][A-Za-z0-9_-]{0,95})")
-_CSS_ID_SELECTOR = re.compile(r"#([A-Za-z][A-Za-z0-9_-]{0,95})")
-_CSS_SIMPLE_TAG_SELECTOR = re.compile(r"^([A-Za-z][A-Za-z0-9-]{0,95})(?:[.#][A-Za-z][A-Za-z0-9_-]{0,95})*$")
-_STYLE_CONTENT = re.compile(r"<style\b[^>]{0,8192}>(.*?)</style\s*>", re.IGNORECASE | re.DOTALL)
+_ACTIVE_TAGS = frozenset({"script", "iframe", "object", "embed"})
+_VOID_TAGS = frozenset(
+    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+)
+_EXTERNAL_ATTRIBUTES = frozenset(
+    {"action", "background", "cite", "data", "formaction", "href", "poster", "src"}
+)
+_ACTIVE_SCHEMES = frozenset({"data", "file", "javascript", "vbscript"})
+_SIMPLE_SELECTOR = re.compile(
+    r"^(?:(?P<tag>[A-Za-z][A-Za-z0-9-]{0,95}))?(?P<suffix>(?:[.#][A-Za-z][A-Za-z0-9_-]{0,95})*)$"
+)
+
+
+@dataclass(slots=True)
+class _CssVisibility:
+    hidden_classes: set[str] = field(default_factory=set)
+    hidden_ids: set[str] = field(default_factory=set)
+    hidden_tags: set[str] = field(default_factory=set)
+    hide_all: bool = False
+
+    def matches(self, tag: str, attributes: list[tuple[str, str]]) -> bool:
+        values = {name: value for name, value in attributes}
+        return (
+            self.hide_all
+            or tag in self.hidden_tags
+            or values.get("id", "") in self.hidden_ids
+            or any(part in self.hidden_classes for part in values.get("class", "").split())
+        )
+
+
+class _StylesheetCollector(HTMLParser):
+    """Collect style element text before DOM extraction without evaluating it."""
+
+    def __init__(self, deadline: Deadline) -> None:
+        super().__init__(convert_charrefs=True)
+        self._deadline = deadline
+        self._in_style = False
+        self.stylesheets: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._deadline.check()
+        if tag.casefold() == "style":
+            self._in_style = True
+
+    def handle_endtag(self, tag: str) -> None:
+        self._deadline.check()
+        if tag.casefold() == "style":
+            self._in_style = False
+
+    def handle_data(self, data: str) -> None:
+        self._deadline.check()
+        if self._in_style:
+            self.stylesheets.append(data)
 
 
 class _VisibleHtml(HTMLParser):
-    """Tracks only closed observations while deriving visible text."""
+    """Strict HTML walker that retains only safely mapped visible text."""
 
-    def __init__(self) -> None:
+    def __init__(self, deadline: Deadline) -> None:
         super().__init__(convert_charrefs=True)
+        self.deadline = deadline
         self.findings: list[Finding] = []
         self.visible_parts: list[str] = []
         self._node = 0
         self._stack: list[tuple[str, int, bool]] = []
-        self._hidden_classes: set[str] = set()
-        self._hidden_ids: set[str] = set()
-        self._hidden_tags: set[str] = set()
-        self._hide_all_following = False
+        self.css = _CssVisibility()
+        self.suppress_derivative = False
 
     def _location(self, node: int | None = None) -> str:
         return f"html:node={node if node is not None else max(self._node, 1)}"
 
-    def _add_hidden_anomaly(self, location: str) -> None:
+    def _add_hidden(self, location: str) -> None:
         self.findings.append(
             Finding(
                 RiskLevel.REVIEW,
@@ -62,141 +106,260 @@ class _VisibleHtml(HTMLParser):
         )
 
     def _add_active(self, location: str, anomaly: AnomalyCode | None = None) -> None:
-        self.findings.append(Finding(RiskLevel.QUARANTINE, EvidenceCode.ACTIVE_CONTENT_PRESENT, location, anomaly))
+        self.suppress_derivative = True
+        self.findings.append(
+            Finding(RiskLevel.QUARANTINE, EvidenceCode.ACTIVE_CONTENT_PRESENT, location, anomaly)
+        )
 
     def _add_external(self, location: str) -> None:
+        self.suppress_derivative = True
         self.findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.EXTERNAL_REFERENCE_PRESENT, location))
 
-    def _record_hidden_selectors(self, stylesheet: str) -> bool:
-        """Remember bounded static CSS selectors that suppress visible text."""
-        found = False
-        for match in _CSS_RULE.finditer(stylesheet):
-            if not _CSS_HIDDEN.search(match.group(2)):
+    def _inspect_url(self, value: str, location: str) -> None:
+        self.deadline.check()
+        value = value.strip()
+        if not value:
+            return
+        parsed = urlsplit(value)
+        if parsed.scheme.casefold() in _ACTIVE_SCHEMES:
+            self._add_active(location)
+        elif value.startswith("//") or parsed.scheme or parsed.netloc or not value.startswith("#"):
+            self._add_external(location)
+
+    def _inspect_tokens_for_urls(self, tokens: list[object], location: str) -> None:
+        for token in tokens:
+            self.deadline.check()
+            token_type = getattr(token, "type", "")
+            if token_type == "error":
+                raise ValueError("invalid CSS token")
+            if token_type == "url":
+                self._inspect_url(str(getattr(token, "value", "")), location)
+            if token_type == "function":
+                if getattr(token, "lower_name", "") == "url":
+                    self._inspect_url(tinycss2.serialize(getattr(token, "arguments", [])).strip(), location)
+                self._inspect_tokens_for_urls(list(getattr(token, "arguments", [])), location)
+
+    @staticmethod
+    def _is_zero(tokens: list[object]) -> bool:
+        tokens = [token for token in tokens if getattr(token, "type", "") != "whitespace"]
+        if len(tokens) != 1:
+            return False
+        token = tokens[0]
+        return getattr(token, "type", "") in {"number", "percentage", "dimension"} and getattr(token, "value", None) == 0
+
+    @staticmethod
+    def _has_transparent_color(tokens: list[object]) -> bool:
+        for token in tokens:
+            if getattr(token, "type", "") == "ident" and getattr(token, "value", "").casefold() == "transparent":
+                return True
+            if getattr(token, "type", "") == "function" and getattr(token, "lower_name", "") in {"rgba", "hsla"}:
+                arguments = [item for item in getattr(token, "arguments", []) if getattr(item, "type", "") == "number"]
+                if arguments and getattr(arguments[-1], "value", None) == 0:
+                    return True
+        return False
+
+    def _declarations_hide(self, declarations: list[object], location: str) -> bool:
+        hidden = False
+        for declaration in declarations:
+            self.deadline.check()
+            if getattr(declaration, "type", "") == "error":
+                raise ValueError("invalid CSS declaration")
+            if getattr(declaration, "type", "") != "declaration":
                 continue
-            found = True
-            selectors = match.group(1)
-            self._hidden_classes.update(_CSS_CLASS_SELECTOR.findall(selectors))
-            self._hidden_ids.update(_CSS_ID_SELECTOR.findall(selectors))
-            for selector in selectors.split(","):
-                simple_tag = _CSS_SIMPLE_TAG_SELECTOR.fullmatch(selector.strip())
-                if simple_tag is not None:
-                    self._hidden_tags.add(simple_tag.group(1).casefold())
-                elif not _CSS_CLASS_SELECTOR.search(selector) and not _CSS_ID_SELECTOR.search(selector):
-                    self._hide_all_following = True
-        return found
+            name = str(getattr(declaration, "lower_name", ""))
+            value = list(getattr(declaration, "value", []))
+            self._inspect_tokens_for_urls(value, location)
+            serialized = tinycss2.serialize(value).strip().casefold()
+            if (
+                (name == "display" and serialized == "none")
+                or (name == "visibility" and serialized in {"hidden", "collapse"})
+                or (name in {"opacity", "font-size"} and self._is_zero(value))
+                or (name in {"color", "background-color"} and self._has_transparent_color(value))
+                or (name == "transform" and "translate" in serialized)
+            ):
+                hidden = True
+            if name in {"left", "right", "top", "bottom", "text-indent"}:
+                for token in value:
+                    if getattr(token, "type", "") in {"dimension", "percentage"} and abs(float(getattr(token, "value", 0))) >= 1000:
+                        hidden = True
+        return hidden
+
+    def _apply_selector(self, selector_text: str) -> None:
+        for selector in selector_text.split(","):
+            match = _SIMPLE_SELECTOR.fullmatch(selector.strip())
+            if match is None:
+                self.css.hide_all = True
+                self.suppress_derivative = True
+                continue
+            tag = match.group("tag")
+            if tag:
+                self.css.hidden_tags.add(tag.casefold())
+            suffix = match.group("suffix")
+            for marker, value in re.findall(r"([.#])([A-Za-z][A-Za-z0-9_-]{0,95})", suffix):
+                if marker == ".":
+                    self.css.hidden_classes.add(value)
+                else:
+                    self.css.hidden_ids.add(value)
+
+    def apply_stylesheet(self, stylesheet: str, location: str) -> None:
+        rules = tinycss2.parse_stylesheet(stylesheet, skip_comments=True, skip_whitespace=True)
+        for rule in rules:
+            self.deadline.check()
+            rule_type = getattr(rule, "type", "")
+            if rule_type == "error":
+                raise ValueError("invalid CSS stylesheet")
+            if rule_type == "at-rule":
+                if getattr(rule, "lower_at_keyword", "") != "import":
+                    raise ValueError("unsupported CSS at-rule")
+                self._add_active(location)
+                self._inspect_tokens_for_urls(list(getattr(rule, "prelude", [])), location)
+                continue
+            if rule_type != "qualified-rule":
+                raise ValueError("unsupported CSS rule")
+            declarations = tinycss2.parse_declaration_list(
+                getattr(rule, "content", []), skip_comments=True, skip_whitespace=True
+            )
+            if self._declarations_hide(declarations, location):
+                self._add_hidden(location)
+                self._apply_selector(tinycss2.serialize(getattr(rule, "prelude", [])).strip())
 
     def preload_stylesheets(self, contents: str) -> None:
-        """Apply static stylesheet visibility before walking DOM order."""
-        for match in _STYLE_CONTENT.finditer(contents):
-            self._record_hidden_selectors(match.group(1))
+        collector = _StylesheetCollector(self.deadline)
+        collector.feed(contents)
+        collector.close()
+        for stylesheet in collector.stylesheets:
+            self.deadline.check()
+            self.apply_stylesheet(stylesheet, "html:node=1")
+
+    def _inspect_attributes(self, attributes: list[tuple[str, str]], location: str) -> None:
+        for name, value in attributes:
+            self.deadline.check()
+            if name != "style":
+                self.findings.extend(
+                    classify_instruction(value, hidden=True, location=location, check_deadline=self.deadline.check)
+                )
+                self.findings.extend(
+                    encoded_block_findings(value, location=location, check_deadline=self.deadline.check)
+                )
+            if name.startswith("on"):
+                self._add_active(location)
+            if name in _EXTERNAL_ATTRIBUTES:
+                self._inspect_url(value, location)
+            elif value.strip().casefold().startswith(tuple(f"{scheme}:" for scheme in _ACTIVE_SCHEMES)):
+                self._add_active(location)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.deadline.check()
         self._node += 1
         location = self._location(self._node)
         tag = tag.casefold()
-        attributes = {name.casefold(): value or "" for name, value in attrs}
+        attributes = [(name.casefold(), value or "") for name, value in attrs]
+        if len({name for name, _ in attributes}) != len(attributes):
+            raise ValueError("duplicate HTML attribute")
         inherited_hidden = bool(self._stack and self._stack[-1][2])
-        class_names = attributes.get("class", "").split()
+        values = {name: value for name, value in attributes}
         directly_hidden = (
-            "hidden" in attributes
-            or attributes.get("aria-hidden", "").casefold() == "true"
-            or any(name in self._hidden_classes for name in class_names)
-            or attributes.get("id", "") in self._hidden_ids
-            or tag in self._hidden_tags
-            or self._hide_all_following
+            "hidden" in values
+            or values.get("aria-hidden", "").casefold() == "true"
+            or self.css.matches(tag, attributes)
         )
-        hidden = (
-            inherited_hidden
-            or tag in _REMOVED_TAGS
-            or directly_hidden
-        )
+        hidden = inherited_hidden or tag in _REMOVED_TAGS or directly_hidden
         if directly_hidden:
-            self._add_hidden_anomaly(location)
-        style = attributes.get("style", "")
-        if _CSS_HIDDEN.search(style):
-            hidden = True
-            self._add_hidden_anomaly(location)
+            self._add_hidden(location)
+        style = values.get("style")
+        if style is not None:
+            declarations = tinycss2.parse_declaration_list(style, skip_comments=True, skip_whitespace=True)
+            if self._declarations_hide(declarations, location):
+                hidden = True
+                self._add_hidden(location)
+        self._inspect_attributes(attributes, location)
         if tag in _ACTIVE_TAGS:
             self._add_active(location, AnomalyCode.SCRIPT_CONTENT if tag == "script" else None)
-        if tag == "meta" and attributes.get("http-equiv", "").casefold() == "refresh":
+        if tag == "meta" and values.get("http-equiv", "").casefold() == "refresh":
             self._add_active(location)
-        if any(name.startswith("on") for name in attributes):
-            self._add_active(location)
-        for name, value in attributes.items():
-            if name in _EXTERNAL_ATTRIBUTES and _EXTERNAL_URL.search(value):
-                self._add_external(location)
-            if _JAVASCRIPT_URL.search(value):
-                self._add_active(location)
-        if _CSS_EXTERNAL_URL.search(style):
-            self._add_external(location)
         if tag not in _VOID_TAGS:
             self._stack.append((tag, self._node, hidden))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
-        self.handle_endtag(tag)
+        if tag.casefold() not in _VOID_TAGS:
+            self.handle_endtag(tag)
 
     def handle_endtag(self, tag: str) -> None:
+        self.deadline.check()
         folded = tag.casefold()
-        for index in range(len(self._stack) - 1, -1, -1):
-            if self._stack[index][0] == folded:
-                del self._stack[index:]
-                break
+        if not self._stack or self._stack[-1][0] != folded:
+            raise ValueError("malformed HTML nesting")
+        self._stack.pop()
 
     def handle_data(self, data: str) -> None:
+        self.deadline.check()
         node = self._stack[-1][1] if self._stack else max(self._node, 1)
         location = self._location(node)
         hidden = bool(self._stack and self._stack[-1][2])
-        if self._stack and self._stack[-1][0] == "style":
-            if self._record_hidden_selectors(data):
-                self._add_hidden_anomaly(location)
-            if _CSS_EXTERNAL_URL.search(data):
-                self._add_external(location)
         if hidden:
-            self.findings.extend(classify_instruction(data, hidden=True, location=location))
-            self.findings.extend(encoded_block_findings(data, location=location))
+            self.findings.extend(
+                classify_instruction(data, hidden=True, location=location, check_deadline=self.deadline.check)
+            )
+            self.findings.extend(encoded_block_findings(data, location=location, check_deadline=self.deadline.check))
             return
-        self.findings.extend(classify_instruction(data, hidden=False, location=location))
-        self.findings.extend(encoded_block_findings(data, location=location))
+        self.findings.extend(classify_instruction(data, hidden=False, location=location, check_deadline=self.deadline.check))
+        self.findings.extend(encoded_block_findings(data, location=location, check_deadline=self.deadline.check))
         for anomaly in anomalies_in(data):
             self.findings.append(
-                Finding(
-                    RiskLevel.REVIEW,
-                    EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH,
-                    location,
-                    anomaly,
-                )
+                Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, location, anomaly)
             )
-        visible = strip_directional_controls(data).strip()
-        if visible:
+        if has_disallowed_controls(data):
+            self.findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, location))
+        visible = normalize_visible_text(data).strip()
+        if visible and not self.suppress_derivative:
             self.visible_parts.append(visible)
 
     def handle_comment(self, data: str) -> None:
-        self.findings.extend(classify_instruction(data, hidden=True, location=self._location()))
-        self.findings.extend(encoded_block_findings(data, location=self._location()))
+        self.deadline.check()
+        location = self._location()
+        self.findings.extend(classify_instruction(data, hidden=True, location=location, check_deadline=self.deadline.check))
+        self.findings.extend(encoded_block_findings(data, location=location, check_deadline=self.deadline.check))
+
+    def handle_decl(self, decl: str) -> None:
+        raise ValueError("HTML declarations are not supported")
+
+    def unknown_decl(self, data: str) -> None:
+        raise ValueError("unknown HTML declaration")
+
+    def handle_pi(self, data: str) -> None:
+        raise ValueError("HTML processing instruction")
 
     def close_output(self) -> ParserOutput:
+        self.deadline.check()
+        if self._stack:
+            raise ValueError("unterminated HTML element")
         return ParserOutput(
             tuple(self.findings),
-            " ".join(self.visible_parts),
+            "" if self.suppress_derivative else " ".join(self.visible_parts),
             frozenset({_HTML_CHECK}),
             frozenset({_HTML_CHECK}),
         )
 
 
+def _failure_output(error: Exception) -> ParserOutput:
+    return ParserOutput(
+        (failure_finding(failure_kind_for_exception(error)),),
+        "",
+        frozenset({_HTML_CHECK}),
+        frozenset(),
+    )
+
+
 def scan_html(source: VerifiedSource, limits: ScanLimits) -> ParserOutput:
-    """Scan a verified HTML snapshot without executing, fetching, or reopening it."""
+    """Scan verified HTML without executing code, fetching resources, or reopening it."""
     try:
-        contents = read_verified_text(source, limits)
-        parser = _VisibleHtml()
+        deadline = Deadline.from_limits(limits)
+        contents = read_verified_text(source, limits, deadline)
+        parser = _VisibleHtml(deadline)
         parser.preload_stylesheets(contents)
         parser.feed(contents)
         parser.close()
         return parser.close_output()
-    except (MemoryError, OSError, RuntimeError, TimeoutError, UnicodeError, ValueError) as error:
-        return ParserOutput(
-            (failure_finding(failure_kind_for_exception(error)),),
-            "",
-            frozenset({_HTML_CHECK}),
-            frozenset(),
-        )
+    except Exception as error:  # noqa: BLE001 -- public security boundary sanitizes all ordinary failures.
+        return _failure_output(error)
