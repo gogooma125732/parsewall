@@ -9,15 +9,28 @@ description = "Closed result contract for document injection scanning"
 requires-python = ">=3.11"
 dependencies = [
   "defusedxml>=0.7.1",
+  "fastapi>=0.116",
   "Pillow>=11.0",
   "pydantic>=2.0",
   "pypdf>=5.0",
   "PyMuPDF>=1.25",
+  "python-multipart>=0.0.20",
   "tinycss2>=1.5.1",
+  "uvicorn>=0.35",
 ]
 
 [project.scripts]
 document-firewall = "injection_firewall.cli:main"
+document-firewall-api = "injection_firewall.api:main"
+document-firewall-worker = "injection_firewall.worker:main"
+
+[dependency-groups]
+dev = [
+  "httpx>=0.28",
+  "mypy>=1.17",
+  "pytest>=8.4",
+  "ruff>=0.12",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/injection_firewall"]

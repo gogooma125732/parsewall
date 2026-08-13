@@ -1,0 +1,44 @@
+services:
+  api:
+    build: .
+    image: document-injection-firewall:local
+    environment:
+      DIF_JOB_STORE: /var/lib/dif/jobs
+      PORT: "8000"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - jobs:/var/lib/dif/jobs
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1.0
+    restart: unless-stopped
+
+  worker:
+    image: document-injection-firewall:local
+    entrypoint: ["document-firewall-worker"]
+    command: ["--store", "/var/lib/dif/jobs", "--interval", "0.5"]
+    environment:
+      DIF_TESSERACT: /usr/bin/tesseract
+      DIF_LIBREOFFICE: /usr/bin/libreoffice
+    volumes:
+      - jobs:/var/lib/dif/jobs
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 768m
+    cpus: 2.0
+    restart: unless-stopped
+    depends_on: [api]
+
+volumes:
+  jobs: {}
