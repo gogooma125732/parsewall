@@ -32,9 +32,6 @@ _EXTERNAL_ATTRIBUTES = frozenset(
     {"action", "background", "cite", "data", "formaction", "href", "poster", "src"}
 )
 _ACTIVE_SCHEMES = frozenset({"data", "file", "javascript", "vbscript"})
-_BLOCK_TAGS = frozenset(
-    {"address", "article", "aside", "blockquote", "div", "dl", "fieldset", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main", "nav", "ol", "p", "pre", "section", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul"}
-)
 _SIMPLE_SELECTOR = re.compile(
     r"^(?:(?P<tag>[A-Za-z][A-Za-z0-9-]{0,95}))?(?P<suffix>(?:[.#][A-Za-z][A-Za-z0-9_-]{0,95})*)$"
 )
@@ -179,11 +176,20 @@ class _VisibleHtml(HTMLParser):
                     (index for index, item in enumerate(arguments) if tinycss2.serialize([item]).strip() == "/"),
                     None,
                 )
-                alpha = arguments[slash + 1 :] if slash is not None else arguments
+                if slash is not None:
+                    alpha = arguments[slash + 1 :]
+                elif getattr(token, "lower_name", "") in {"rgba", "hsla"}:
+                    alpha = arguments
+                else:
+                    continue
                 numeric = [
                     item for item in alpha if getattr(item, "type", "") in {"number", "percentage"}
                 ]
-                if numeric and getattr(numeric[-1], "value", None) == 0:
+                if (
+                    numeric
+                    and (slash is not None or len(numeric) == 4)
+                    and getattr(numeric[-1], "value", None) == 0
+                ):
                     return True
                 if slash is not None and not numeric:
                     return True
@@ -237,6 +243,7 @@ class _VisibleHtml(HTMLParser):
                 "top",
                 "bottom",
                 "text-indent",
+                "filter",
             }:
                 self.suppress_derivative = True
                 hidden = True
@@ -358,9 +365,14 @@ class _VisibleHtml(HTMLParser):
             self._add_active(location, AnomalyCode.SCRIPT_CONTENT if tag == "script" else None)
         if tag == "meta" and values.get("http-equiv", "").casefold() == "refresh":
             self._add_active(location)
+        if inherited_hidden and tag in _VOID_TAGS:
+            hidden_text = self._stack[-1].hidden_text
+            if hidden_text is None:
+                raise ValueError("missing hidden text buffer")
+            self._append_hidden(hidden_text, " ")
         if tag not in _VOID_TAGS:
             inherited_buffer = self._stack[-1].hidden_text if inherited_hidden else None
-            if inherited_hidden and tag in _BLOCK_TAGS and inherited_buffer is not None:
+            if inherited_hidden and inherited_buffer is not None:
                 self._append_hidden(inherited_buffer, " ")
             hidden_text = inherited_buffer if hidden else None
             self._stack.append(_Element(tag, self._node, hidden, hidden_text))
@@ -397,7 +409,7 @@ class _VisibleHtml(HTMLParser):
                     hidden_text, location=self._location(element.node), check_deadline=self.deadline.check
                 )
             )
-        elif element.hidden and inherited_hidden and element.tag in _BLOCK_TAGS and element.hidden_text is not None:
+        elif element.hidden and inherited_hidden and element.hidden_text is not None:
             self._append_hidden(element.hidden_text, " ")
 
     def handle_data(self, data: str) -> None:

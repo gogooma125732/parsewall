@@ -195,7 +195,7 @@ def encoded_block_findings(
             payload_length += 1
             segment_length += 1
             longest_segment = max(longest_segment, segment_length)
-            has_base64_signal = has_base64_signal or character in "+/=_-"
+            has_base64_signal = has_base64_signal or character in "+/="
             if len(candidate) < _ENCODED_DECODE_MAXIMUM:
                 candidate.append(character)
         elif character.isspace() and payload_length:

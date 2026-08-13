@@ -140,6 +140,37 @@ def _html_findings(token: str, findings: list[Finding], deadline: Deadline) -> t
     return suppress, hidden_tag
 
 
+def _consume_hidden_html_block(
+    contents: str, open_end: int, tag: str, deadline: Deadline
+) -> tuple[str, int] | None:
+    """Return a bounded raw hidden body while accounting for same-tag nesting."""
+    body_start = open_end + 1
+    cursor = body_start
+    limit = min(len(contents), body_start + _MAX_MARKDOWN_TOKEN)
+    depth = 1
+    while cursor < limit:
+        deadline.check()
+        token_start = contents.find("<", cursor, limit)
+        if token_start < 0:
+            break
+        token = _consume_html_tag(contents, token_start, deadline)
+        if token is None:
+            return None
+        raw, token_end = token
+        if token_end >= limit:
+            return None
+        head = re.match(r"(?is)<\s*/?\s*([A-Za-z][A-Za-z0-9-]*)", raw)
+        if head is not None and head.group(1).casefold() == tag:
+            if raw.lstrip().startswith("</"):
+                depth -= 1
+                if depth == 0:
+                    return contents[body_start:token_start], token_end
+            elif not raw.rstrip().endswith("/>"):
+                depth += 1
+        cursor = token_end + 1
+    return None
+
+
 def _reference_definitions(contents: str, deadline: Deadline) -> dict[str, str]:
     """Collect bounded reference definitions before scanning link uses."""
     definitions: dict[str, str] = {}
@@ -195,15 +226,14 @@ def _add_markdown_findings(contents: str, findings: list[Finding], deadline: Dea
                 raw_suppressed, hidden_tag = _html_findings(raw, findings, deadline)
                 suppress_derivative = raw_suppressed or suppress_derivative
                 if hidden_tag is not None and not raw.lstrip().startswith("</"):
-                    closing = re.compile(rf"(?is)</\s*{re.escape(hidden_tag)}\s*>").search(
-                        contents, end + 1, min(len(contents), end + 1 + _MAX_MARKDOWN_TOKEN)
-                    )
-                    if closing is None:
+                    hidden_block = _consume_hidden_html_block(contents, end, hidden_tag, deadline)
+                    if hidden_block is None:
                         findings.append(
                             Finding(RiskLevel.QUARANTINE, EvidenceCode.ACTIVE_CONTENT_PRESENT, "text:line=1")
                         )
                     else:
-                        body = re.sub(r"(?is)<[^>]{0,8192}>", " ", contents[end + 1 : closing.start()])
+                        raw_body, _ = hidden_block
+                        body = re.sub(r"(?is)<[^>]{0,8192}>", " ", raw_body)
                         findings.extend(
                             classify_instruction(
                                 body, hidden=True, location="text:line=1", check_deadline=deadline.check
