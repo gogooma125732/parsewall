@@ -1,8 +1,7 @@
-"""Scanner for preflight-verified plain text and Markdown."""
+"""Scanner for preflight-verified plain text and bounded Markdown constructs."""
 
 import re
 from html import unescape
-from itertools import chain
 from urllib.parse import urlsplit
 
 from ..contract import AnomalyCode, EvidenceCode, Finding, RiskLevel
@@ -19,39 +18,107 @@ from ..preflight import VerifiedSource
 from .base import Deadline, ParserOutput, read_verified_text
 
 _TEXT_CHECK = "text-patterns"
-_RAW_HTML = re.compile(r"<[!?/]?[A-Za-z][^>\r\n]{0,8192}>")
-_ACTIVE_HTML = re.compile(r"<\s*(?:script|iframe|object|embed)\b|\son[A-Za-z0-9_-]*\s*=", re.IGNORECASE)
-_HIDDEN_HTML = re.compile(r"\b(?:hidden|style|aria-hidden)\s*=", re.IGNORECASE)
-_MARKDOWN_LINK = re.compile(
-    r"!?\[[^\]\r\n]{0,4096}\]\(\s*(?:<([^>\r\n]{1,8192})>|([^\s)\r\n]{1,8192}))",
-)
-_MARKDOWN_REFERENCE = re.compile(
-    r"(?m)^[ \t]{0,3}\[[^\]\r\n]{1,4096}\]:[ \t]*(?:<([^>\r\n]{1,8192})>|([^\s\r\n]{1,8192}))"
-)
+_MAX_MARKDOWN_TOKEN = 8192
 _ACTIVE_SCHEMES = frozenset({"data", "file", "javascript", "vbscript"})
+_ACTIVE_HTML_TAGS = frozenset({"script", "iframe", "object", "embed"})
+_URL_HTML_ATTRIBUTES = frozenset(
+    {"action", "background", "cite", "data", "formaction", "href", "poster", "src"}
+)
+_ATTRIBUTE = re.compile(
+    r"(?is)([A-Za-z_:][A-Za-z0-9:._-]*)(?:\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+)))?"
+)
 
 
-def _add_markdown_findings(
-    contents: str, findings: list[Finding], deadline: Deadline
-) -> bool:
-    """Scan Markdown links/raw HTML and conservatively suppress their derivative."""
-    suppress_derivative = False
-    for match in _RAW_HTML.finditer(contents):
+def _label(value: str) -> str:
+    """Canonicalize a bounded Markdown label without exposing it in output."""
+    return re.sub(r"\\(.)", r"\1", unescape(value)).casefold().strip()
+
+
+def _consume_bracket(contents: str, start: int, deadline: Deadline) -> tuple[str, int] | None:
+    """Return escaped Markdown bracket content and its closing index."""
+    for index in range(start + 1, min(len(contents), start + _MAX_MARKDOWN_TOKEN)):
+        if index % 256 == 0:
+            deadline.check()
+        if contents[index] == "\\":
+            continue
+        if contents[index] == "]" and (index == start + 1 or contents[index - 1] != "\\"):
+            return contents[start + 1 : index], index
+    return None
+
+
+def _consume_parentheses(contents: str, start: int, deadline: Deadline) -> tuple[str, int] | None:
+    """Return one bounded Markdown destination while honoring escapes and nesting."""
+    depth = 1
+    quote = ""
+    for index in range(start + 1, min(len(contents), start + _MAX_MARKDOWN_TOKEN)):
+        if index % 256 == 0:
+            deadline.check()
+        character = contents[index]
+        if character == "\\":
+            continue
+        if quote:
+            if character == quote:
+                quote = ""
+            continue
+        if character in {"'", '\"'}:
+            quote = character
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                return contents[start + 1 : index], index
+    return None
+
+
+def _consume_html_tag(contents: str, start: int, deadline: Deadline) -> tuple[str, int] | None:
+    """Return one bounded, quote-aware raw HTML-shaped construct."""
+    quote = ""
+    for index in range(start + 1, min(len(contents), start + _MAX_MARKDOWN_TOKEN)):
+        if index % 256 == 0:
+            deadline.check()
+        character = contents[index]
+        if quote:
+            if character == quote:
+                quote = ""
+        elif character in {"'", '\"'}:
+            quote = character
+        elif character == ">":
+            return contents[start : index + 1], index
+    return None
+
+
+def _destination_finding(destination: str, findings: list[Finding], deadline: Deadline) -> bool:
+    """Classify one untrusted link destination without retaining its text."""
+    deadline.check()
+    value = unescape(destination.strip()).strip("<>")
+    parsed = urlsplit(value)
+    if parsed.scheme.casefold() in _ACTIVE_SCHEMES:
+        findings.append(Finding(RiskLevel.QUARANTINE, EvidenceCode.ACTIVE_CONTENT_PRESENT, "text:line=1"))
+        return True
+    if value.startswith("//") or parsed.scheme or parsed.netloc:
+        findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.EXTERNAL_REFERENCE_PRESENT, "text:line=1"))
+        return True
+    return False
+
+
+def _html_findings(token: str, findings: list[Finding], deadline: Deadline) -> bool:
+    """Inspect a raw HTML token conservatively without building a DOM derivative."""
+    deadline.check()
+    suppress = True
+    findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, "text:line=1"))
+    head = re.match(r"(?is)<\s*/?\s*([A-Za-z][A-Za-z0-9-]*)", token)
+    if head is None:
+        return suppress
+    if head.group(1).casefold() in _ACTIVE_HTML_TAGS:
+        findings.append(Finding(RiskLevel.QUARANTINE, EvidenceCode.ACTIVE_CONTENT_PRESENT, "text:line=1"))
+    for match in _ATTRIBUTE.finditer(token[head.end() :]):
         deadline.check()
-        suppress_derivative = True
-        findings.append(
-            Finding(
-                RiskLevel.REVIEW,
-                EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH,
-                "text:line=1",
-            )
-        )
-        token = match.group(0)
-        if _ACTIVE_HTML.search(token):
-            findings.append(
-                Finding(RiskLevel.QUARANTINE, EvidenceCode.ACTIVE_CONTENT_PRESENT, "text:line=1")
-            )
-        if _HIDDEN_HTML.search(token):
+        name = match.group(1).casefold()
+        value = match.group(2) or match.group(3) or match.group(4) or ""
+        if name.startswith("on"):
+            findings.append(Finding(RiskLevel.QUARANTINE, EvidenceCode.ACTIVE_CONTENT_PRESENT, "text:line=1"))
+        if name in {"hidden", "style", "aria-hidden"}:
             findings.append(
                 Finding(
                     RiskLevel.REVIEW,
@@ -60,20 +127,90 @@ def _add_markdown_findings(
                     AnomalyCode.DOM_HIDDEN_CONTENT,
                 )
             )
-    for match in chain(_MARKDOWN_LINK.finditer(contents), _MARKDOWN_REFERENCE.finditer(contents)):
-        deadline.check()
-        destination = unescape((match.group(1) or match.group(2) or "").strip())
-        parsed = urlsplit(destination)
-        if parsed.scheme.casefold() in _ACTIVE_SCHEMES:
-            suppress_derivative = True
-            findings.append(
-                Finding(RiskLevel.QUARANTINE, EvidenceCode.ACTIVE_CONTENT_PRESENT, "text:line=1")
-            )
-        elif destination.startswith("//") or parsed.scheme or parsed.netloc:
-            suppress_derivative = True
-            findings.append(
-                Finding(RiskLevel.REVIEW, EvidenceCode.EXTERNAL_REFERENCE_PRESENT, "text:line=1")
-            )
+        if name in _URL_HTML_ATTRIBUTES:
+            _destination_finding(value, findings, deadline)
+    return suppress
+
+
+def _reference_definitions(contents: str, deadline: Deadline) -> dict[str, str]:
+    """Collect bounded reference definitions before scanning link uses."""
+    definitions: dict[str, str] = {}
+    for index, character in enumerate(contents):
+        if index % 256 == 0:
+            deadline.check()
+        if character != "[" or (index and contents[index - 1] not in {"\n", "\r"}):
+            continue
+        label = _consume_bracket(contents, index, deadline)
+        if label is None:
+            continue
+        raw_label, close = label
+        cursor = close + 1
+        if cursor >= len(contents) or contents[cursor] != ":":
+            continue
+        cursor += 1
+        while cursor < len(contents) and contents[cursor] in {" ", "\t"}:
+            cursor += 1
+        end = cursor
+        while end < len(contents) and contents[end] not in {" ", "\t", "\r", "\n"}:
+            end += 1
+        if end > cursor:
+            definitions[_label(raw_label)] = contents[cursor:end]
+    return definitions
+
+
+def _add_markdown_findings(contents: str, findings: list[Finding], deadline: Deadline) -> bool:
+    """Boundedly tokenize Markdown links/raw HTML and suppress untrusted derivatives."""
+    suppress_derivative = False
+    definitions = _reference_definitions(contents, deadline)
+    index = 0
+    while index < len(contents):
+        if index % 256 == 0:
+            deadline.check()
+        character = contents[index]
+        if character == "<":
+            token = _consume_html_tag(contents, index, deadline)
+            if token is None:
+                findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, "text:line=1"))
+                suppress_derivative = True
+            else:
+                raw, end = token
+                suppress_derivative = _html_findings(raw, findings, deadline) or suppress_derivative
+                index = end
+        link_start = index + 1 if character == "!" and index + 1 < len(contents) and contents[index + 1] == "[" else index
+        if contents[link_start : link_start + 1] == "[":
+            label = _consume_bracket(contents, link_start, deadline)
+            if label is None:
+                findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, "text:line=1"))
+                suppress_derivative = True
+            else:
+                raw_label, close = label
+                cursor = close + 1
+                if cursor < len(contents) and contents[cursor] == "(":
+                    destination = _consume_parentheses(contents, cursor, deadline)
+                    if destination is None:
+                        findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, "text:line=1"))
+                        suppress_derivative = True
+                    else:
+                        raw_destination, end = destination
+                        suppress_derivative = _destination_finding(raw_destination, findings, deadline) or suppress_derivative
+                        index = end
+                elif cursor < len(contents) and contents[cursor] == "[":
+                    reference = _consume_bracket(contents, cursor, deadline)
+                    if reference is None:
+                        findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, "text:line=1"))
+                        suppress_derivative = True
+                    else:
+                        raw_reference, end = reference
+                        reference_label = _label(raw_reference) or _label(raw_label)
+                        if reference_label in definitions:
+                            suppress_derivative = _destination_finding(
+                                definitions[reference_label], findings, deadline
+                            ) or suppress_derivative
+                        else:
+                            findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, "text:line=1"))
+                            suppress_derivative = True
+                        index = end
+        index += 1
     return suppress_derivative
 
 
@@ -94,32 +231,19 @@ def scan_text(source: VerifiedSource, limits: ScanLimits) -> ParserOutput:
         findings: list[Finding] = []
         suppress_derivative = _add_markdown_findings(contents, findings, deadline)
         if has_disallowed_controls(contents):
-            findings.append(
-                Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, "text:line=1")
-            )
+            findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, "text:line=1"))
         for number, line in enumerate(contents.splitlines(), start=1):
             deadline.check()
             location = f"text:line={number}"
             for anomaly in anomalies_in(line):
-                findings.append(
-                    Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, location, anomaly)
-                )
-            findings.extend(
-                classify_instruction(line, hidden=False, location=location, check_deadline=deadline.check)
-            )
-        encoded_findings = encoded_block_findings(
-            contents, location="text:line=1", check_deadline=deadline.check
-        )
+                findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, location, anomaly))
+            findings.extend(classify_instruction(line, hidden=False, location=location, check_deadline=deadline.check))
+        encoded_findings = encoded_block_findings(contents, location="text:line=1", check_deadline=deadline.check)
         findings.extend(encoded_findings)
         derivative = "" if suppress_derivative or encoded_findings else normalize_visible_text(
             contents, check_deadline=deadline.check
         )
         deadline.check()
-        return ParserOutput(
-            tuple(findings),
-            derivative,
-            frozenset({_TEXT_CHECK}),
-            frozenset({_TEXT_CHECK}),
-        )
+        return ParserOutput(tuple(findings), derivative, frozenset({_TEXT_CHECK}), frozenset({_TEXT_CHECK}))
     except Exception as error:  # noqa: BLE001 -- public security boundary sanitizes all ordinary failures.
         return _failure_output(error)

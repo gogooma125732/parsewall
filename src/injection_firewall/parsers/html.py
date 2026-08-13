@@ -54,6 +54,14 @@ class _CssVisibility:
         )
 
 
+@dataclass(slots=True)
+class _Element:
+    tag: str
+    node: int
+    hidden: bool
+    hidden_text: list[str] | None
+
+
 class _StylesheetCollector(HTMLParser):
     """Collect style element text before DOM extraction without evaluating it."""
 
@@ -88,7 +96,8 @@ class _VisibleHtml(HTMLParser):
         self.findings: list[Finding] = []
         self.visible_parts: list[str] = []
         self._node = 0
-        self._stack: list[tuple[str, int, bool]] = []
+        self._stack: list[_Element] = []
+        self._hidden_buffer_sizes: dict[int, int] = {}
         self.css = _CssVisibility()
         self.suppress_derivative = False
 
@@ -157,14 +166,31 @@ class _VisibleHtml(HTMLParser):
         for token in tokens:
             if getattr(token, "type", "") == "ident" and getattr(token, "value", "").casefold() == "transparent":
                 return True
-            if getattr(token, "type", "") == "function" and getattr(token, "lower_name", "") in {"rgba", "hsla"}:
-                arguments = [
-                    item
-                    for item in getattr(token, "arguments", [])
-                    if getattr(item, "type", "") in {"number", "percentage"}
+            if getattr(token, "type", "") == "function":
+                arguments = list(getattr(token, "arguments", []))
+                slash = next(
+                    (index for index, item in enumerate(arguments) if tinycss2.serialize([item]).strip() == "/"),
+                    None,
+                )
+                alpha = arguments[slash + 1 :] if slash is not None else arguments
+                numeric = [
+                    item for item in alpha if getattr(item, "type", "") in {"number", "percentage"}
                 ]
-                if arguments and getattr(arguments[-1], "value", None) == 0:
+                if numeric and getattr(numeric[-1], "value", None) == 0:
                     return True
+                if getattr(token, "lower_name", "") in {"rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color"} and slash is not None:
+                    return True
+        return False
+
+    @staticmethod
+    def _contains_var(tokens: list[object]) -> bool:
+        for token in tokens:
+            if getattr(token, "type", "") != "function":
+                continue
+            if getattr(token, "lower_name", "") == "var" or _VisibleHtml._contains_var(
+                list(getattr(token, "arguments", []))
+            ):
+                return True
         return False
 
     def _declarations_hide(self, declarations: list[object], location: str) -> bool:
@@ -179,10 +205,7 @@ class _VisibleHtml(HTMLParser):
             value = list(getattr(declaration, "value", []))
             self._inspect_tokens_for_urls(value, location)
             serialized = tinycss2.serialize(value).strip().casefold()
-            has_var = any(
-                getattr(token, "type", "") == "function" and getattr(token, "lower_name", "") == "var"
-                for token in value
-            )
+            has_var = self._contains_var(value)
             if has_var and name in {
                 "display",
                 "visibility",
@@ -285,7 +308,7 @@ class _VisibleHtml(HTMLParser):
         attributes = [(name.casefold(), value or "") for name, value in attrs]
         if len({name for name, _ in attributes}) != len(attributes):
             raise ValueError("duplicate HTML attribute")
-        inherited_hidden = bool(self._stack and self._stack[-1][2])
+        inherited_hidden = bool(self._stack and self._stack[-1].hidden)
         values = {name: value for name, value in attributes}
         directly_hidden = (
             "hidden" in values
@@ -307,7 +330,11 @@ class _VisibleHtml(HTMLParser):
         if tag == "meta" and values.get("http-equiv", "").casefold() == "refresh":
             self._add_active(location)
         if tag not in _VOID_TAGS:
-            self._stack.append((tag, self._node, hidden))
+            inherited_buffer = self._stack[-1].hidden_text if inherited_hidden else None
+            hidden_text = inherited_buffer if hidden else None
+            self._stack.append(_Element(tag, self._node, hidden, hidden_text))
+            if hidden and not inherited_hidden:
+                self._stack[-1].hidden_text = []
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
@@ -317,19 +344,38 @@ class _VisibleHtml(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         self.deadline.check()
         folded = tag.casefold()
-        if not self._stack or self._stack[-1][0] != folded:
+        if not self._stack or self._stack[-1].tag != folded:
             raise ValueError("malformed HTML nesting")
-        self._stack.pop()
+        element = self._stack.pop()
+        inherited_hidden = bool(self._stack and self._stack[-1].hidden)
+        if element.hidden and not inherited_hidden and element.hidden_text is not None:
+            hidden_text = "".join(element.hidden_text)
+            self._hidden_buffer_sizes.pop(id(element.hidden_text), None)
+            self.findings.extend(
+                classify_instruction(
+                    hidden_text,
+                    hidden=True,
+                    location=self._location(element.node),
+                    check_deadline=self.deadline.check,
+                )
+            )
 
     def handle_data(self, data: str) -> None:
         self.deadline.check()
-        node = self._stack[-1][1] if self._stack else max(self._node, 1)
+        node = self._stack[-1].node if self._stack else max(self._node, 1)
         location = self._location(node)
-        hidden = bool(self._stack and self._stack[-1][2])
+        hidden = bool(self._stack and self._stack[-1].hidden)
         if hidden:
-            self.findings.extend(
-                classify_instruction(data, hidden=True, location=location, check_deadline=self.deadline.check)
-            )
+            hidden_text = self._stack[-1].hidden_text
+            if hidden_text is None:
+                raise ValueError("missing hidden text buffer")
+            normalized = normalize_visible_text(data, check_deadline=self.deadline.check)
+            buffer_id = id(hidden_text)
+            size = self._hidden_buffer_sizes.get(buffer_id, 0) + len(normalized)
+            if size > 32_768:
+                raise MemoryError
+            self._hidden_buffer_sizes[buffer_id] = size
+            hidden_text.append(normalized)
             self.findings.extend(encoded_block_findings(data, location=location, check_deadline=self.deadline.check))
             return
         self.findings.extend(classify_instruction(data, hidden=False, location=location, check_deadline=self.deadline.check))

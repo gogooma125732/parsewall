@@ -118,18 +118,32 @@ def encoded_block_findings(
     findings: list[Finding] = []
     candidate: list[str] = []
     payload_length = 0
-    segment_length = 0
+    whitespace_count = 0
+    has_base64_signal = False
+    has_lower = False
+    has_upper_or_digit = False
 
     def flush() -> None:
-        nonlocal candidate, payload_length, segment_length
+        nonlocal candidate, payload_length, whitespace_count, has_base64_signal, has_lower, has_upper_or_digit
         if payload_length < _ENCODED_MINIMUM:
             candidate = []
             payload_length = 0
-            segment_length = 0
+            whitespace_count = 0
+            has_base64_signal = False
+            has_lower = False
+            has_upper_or_digit = False
             return
         _check(check_deadline)
         encoded = "".join(candidate)
         decoded = _decode_encoded_block(encoded) if payload_length <= _ENCODED_DECODE_MAXIMUM else None
+        if whitespace_count and decoded is None and not (has_base64_signal or (has_lower and has_upper_or_digit)):
+            candidate = []
+            payload_length = 0
+            whitespace_count = 0
+            has_base64_signal = False
+            has_lower = False
+            has_upper_or_digit = False
+            return
         is_instruction = decoded is not None and bool(
             classify_instruction(
                 decoded,
@@ -148,20 +162,25 @@ def encoded_block_findings(
         )
         candidate = []
         payload_length = 0
-        segment_length = 0
+        whitespace_count = 0
+        has_base64_signal = False
+        has_lower = False
+        has_upper_or_digit = False
 
     for index, character in enumerate(text):
         if index % 256 == 0:
             _check(check_deadline)
         if character in _ENCODED_ALPHABET:
             payload_length += 1
-            segment_length += 1
+            has_base64_signal = has_base64_signal or character in "+/=_-"
+            has_lower = has_lower or character.islower()
+            has_upper_or_digit = has_upper_or_digit or character.isupper() or character.isdigit()
             if len(candidate) < _ENCODED_DECODE_MAXIMUM:
                 candidate.append(character)
-        elif character in {" ", "\n", "\r", "\t"} and payload_length and segment_length >= 16:
+        elif character in {" ", "\n", "\r", "\t"} and payload_length:
             if len(candidate) < _ENCODED_DECODE_MAXIMUM:
                 candidate.append(character)
-            segment_length = 0
+            whitespace_count += 1
         else:
             flush()
     flush()
