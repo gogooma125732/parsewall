@@ -153,8 +153,7 @@ def encoded_block_findings(
             has_base64_signal = False
             return
         if (
-            whitespace_count
-            and decoded is None
+            decoded is None
             and not has_base64_signal
             and longest_segment < _ENCODED_MINIMUM
         ):
@@ -193,9 +192,9 @@ def encoded_block_findings(
             _check(check_deadline)
         if character in _ENCODED_ALPHABET:
             payload_length += 1
-            segment_length += 1
+            segment_length = 0 if character == "/" else segment_length + 1
             longest_segment = max(longest_segment, segment_length)
-            has_base64_signal = has_base64_signal or character in "+/="
+            has_base64_signal = has_base64_signal or character in "+="
             if len(candidate) < _ENCODED_DECODE_MAXIMUM:
                 candidate.append(character)
         elif character.isspace() and payload_length:

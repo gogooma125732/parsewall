@@ -2,10 +2,12 @@
 
 import re
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
 import tinycss2  # type: ignore[import-untyped]
+from tinycss2.color3 import parse_color  # type: ignore[import-untyped]
 
 from ..contract import AnomalyCode, EvidenceCode, Finding, RiskLevel
 from ..limits import ScanLimits
@@ -35,6 +37,12 @@ _ACTIVE_SCHEMES = frozenset({"data", "file", "javascript", "vbscript"})
 _SIMPLE_SELECTOR = re.compile(
     r"^(?:(?P<tag>[A-Za-z][A-Za-z0-9-]{0,95}))?(?P<suffix>(?:[.#][A-Za-z][A-Za-z0-9_-]{0,95})*)$"
 )
+
+
+class _VisibilityProof(Enum):
+    VISIBLE = auto()
+    HIDDEN = auto()
+    UNCERTAIN = auto()
 
 
 @dataclass(slots=True)
@@ -162,49 +170,144 @@ class _VisibleHtml(HTMLParser):
         return getattr(token, "type", "") in {"number", "percentage", "dimension"} and getattr(token, "value", None) == 0
 
     @staticmethod
-    def _has_transparent_color(tokens: list[object]) -> bool:
-        for token in tokens:
-            if getattr(token, "type", "") == "ident" and getattr(token, "value", "").casefold() == "transparent":
-                return True
-            if getattr(token, "type", "") == "hash":
-                value = str(getattr(token, "value", "")).casefold()
-                if (len(value) == 4 and value[-1] == "0") or (len(value) == 8 and value[-2:] == "00"):
-                    return True
-            if getattr(token, "type", "") == "function":
-                arguments = list(getattr(token, "arguments", []))
-                slash = next(
-                    (index for index, item in enumerate(arguments) if tinycss2.serialize([item]).strip() == "/"),
-                    None,
-                )
-                if slash is not None:
-                    alpha = arguments[slash + 1 :]
-                elif getattr(token, "lower_name", "") in {"rgba", "hsla"}:
-                    alpha = arguments
-                else:
-                    continue
-                numeric = [
-                    item for item in alpha if getattr(item, "type", "") in {"number", "percentage"}
-                ]
-                if (
-                    numeric
-                    and (slash is not None or len(numeric) == 4)
-                    and getattr(numeric[-1], "value", None) == 0
-                ):
-                    return True
-                if slash is not None and not numeric:
-                    return True
-        return False
+    def _alpha_literal_proof(tokens: list[object]) -> _VisibilityProof:
+        significant = [
+            token for token in tokens if getattr(token, "type", "") != "whitespace"
+        ]
+        if len(significant) != 1:
+            return _VisibilityProof.UNCERTAIN
+        token = significant[0]
+        if getattr(token, "type", "") not in {"number", "percentage"}:
+            return _VisibilityProof.UNCERTAIN
+        value = getattr(token, "value", None)
+        if not isinstance(value, (int, float)):
+            return _VisibilityProof.UNCERTAIN
+        return _VisibilityProof.HIDDEN if value <= 0 else _VisibilityProof.VISIBLE
 
-    def _has_zero_filter_opacity(self, tokens: list[object]) -> bool:
-        for token in tokens:
+    @staticmethod
+    def _hue_is_literal(token: object) -> bool:
+        token_type = getattr(token, "type", "")
+        return token_type == "number" or (
+            token_type == "dimension"
+            and str(getattr(token, "lower_unit", "")) in {"deg", "grad", "rad", "turn"}
+        )
+
+    @classmethod
+    def _color_visibility_proof(cls, tokens: list[object]) -> _VisibilityProof:
+        significant = [
+            token for token in tokens if getattr(token, "type", "") != "whitespace"
+        ]
+        if len(significant) != 1:
+            return _VisibilityProof.UNCERTAIN
+        token = significant[0]
+        token_type = getattr(token, "type", "")
+        if token_type in {"ident", "hash"}:
+            parsed = parse_color(token)
+            alpha = getattr(parsed, "alpha", None)
+            if isinstance(alpha, (int, float)):
+                return _VisibilityProof.HIDDEN if alpha <= 0 else _VisibilityProof.VISIBLE
+            return _VisibilityProof.UNCERTAIN
+        if token_type != "function":
+            return _VisibilityProof.UNCERTAIN
+
+        name = str(getattr(token, "lower_name", ""))
+        if name not in {"rgb", "rgba", "hsl", "hsla"}:
+            return _VisibilityProof.UNCERTAIN
+        arguments = list(getattr(token, "arguments", []))
+        slash_indexes = [
+            index
+            for index, item in enumerate(arguments)
+            if getattr(item, "type", "") == "literal" and getattr(item, "value", "") == "/"
+        ]
+        if len(slash_indexes) > 1:
+            return _VisibilityProof.UNCERTAIN
+        comma_indexes = [
+            index
+            for index, item in enumerate(arguments)
+            if getattr(item, "type", "") == "literal" and getattr(item, "value", "") == ","
+        ]
+        if slash_indexes and comma_indexes:
+            return _VisibilityProof.UNCERTAIN
+        if comma_indexes:
+            groups: list[list[object]] = [[]]
+            for item in arguments:
+                if getattr(item, "type", "") == "literal" and getattr(item, "value", "") == ",":
+                    groups.append([])
+                elif getattr(item, "type", "") != "whitespace":
+                    groups[-1].append(item)
+            if len(groups) not in {3, 4} or any(len(group) != 1 for group in groups[:3]):
+                return _VisibilityProof.UNCERTAIN
+            channel_types = [getattr(group[0], "type", "") for group in groups[:3]]
+            if name in {"rgb", "rgba"}:
+                channels_are_literals = all(
+                    channel_type in {"number", "percentage"} for channel_type in channel_types
+                )
+            else:
+                channels_are_literals = (
+                    cls._hue_is_literal(groups[0][0])
+                    and channel_types[1:] == ["percentage", "percentage"]
+                )
+            if not channels_are_literals:
+                return _VisibilityProof.UNCERTAIN
+            if len(groups) == 3:
+                return (
+                    _VisibilityProof.VISIBLE
+                    if name in {"rgb", "hsl"}
+                    else _VisibilityProof.UNCERTAIN
+                )
+            if name not in {"rgba", "hsla"}:
+                return _VisibilityProof.UNCERTAIN
+            return cls._alpha_literal_proof(groups[3])
+
+        channel_tokens = arguments[: slash_indexes[0]] if slash_indexes else arguments
+        channels = [item for item in channel_tokens if getattr(item, "type", "") != "whitespace"]
+        if len(channels) != 3:
+            return _VisibilityProof.UNCERTAIN
+        channel_types = [getattr(item, "type", "") for item in channels]
+        channels_are_literals = (
+            name in {"rgb", "rgba"}
+            and all(
+                channel_type in {"number", "percentage"} for channel_type in channel_types
+            )
+        ) or (
+            name in {"hsl", "hsla"}
+            and cls._hue_is_literal(channels[0])
+            and channel_types[1:] == ["percentage", "percentage"]
+        )
+        if not channels_are_literals:
+            return _VisibilityProof.UNCERTAIN
+        if slash_indexes:
+            return cls._alpha_literal_proof(arguments[slash_indexes[0] + 1 :])
+        return _VisibilityProof.VISIBLE
+
+    @classmethod
+    def _filter_visibility_proof(cls, tokens: list[object]) -> _VisibilityProof:
+        significant = [
+            token for token in tokens if getattr(token, "type", "") != "whitespace"
+        ]
+        if not significant:
+            return _VisibilityProof.UNCERTAIN
+        if len(significant) == 1 and getattr(significant[0], "type", "") == "ident":
+            return (
+                _VisibilityProof.VISIBLE
+                if str(getattr(significant[0], "value", "")).casefold() == "none"
+                else _VisibilityProof.UNCERTAIN
+            )
+        proof = _VisibilityProof.VISIBLE
+        for token in significant:
             if getattr(token, "type", "") != "function":
-                continue
+                return _VisibilityProof.UNCERTAIN
             arguments = list(getattr(token, "arguments", []))
-            if getattr(token, "lower_name", "") == "opacity" and self._is_zero(arguments):
-                return True
-            if self._has_zero_filter_opacity(arguments):
-                return True
-        return False
+            name = str(getattr(token, "lower_name", ""))
+            if name == "opacity":
+                opacity_proof = cls._alpha_literal_proof(arguments)
+                if opacity_proof is _VisibilityProof.HIDDEN:
+                    return opacity_proof
+                if opacity_proof is _VisibilityProof.UNCERTAIN:
+                    proof = opacity_proof
+            else:
+                proof = _VisibilityProof.UNCERTAIN
+        return proof
 
     @staticmethod
     def _contains_var(tokens: list[object]) -> bool:
@@ -247,13 +350,22 @@ class _VisibleHtml(HTMLParser):
             }:
                 self.suppress_derivative = True
                 hidden = True
+            visibility_proof = _VisibilityProof.VISIBLE
+            if name == "opacity":
+                visibility_proof = self._alpha_literal_proof(value)
+            elif name in {"color", "background-color"}:
+                visibility_proof = self._color_visibility_proof(value)
+            elif name == "filter":
+                visibility_proof = self._filter_visibility_proof(value)
+            if visibility_proof is _VisibilityProof.UNCERTAIN:
+                self.suppress_derivative = True
+                hidden = True
             if (
                 (name == "display" and serialized == "none")
                 or (name == "visibility" and serialized in {"hidden", "collapse"})
-                or (name in {"opacity", "font-size"} and self._is_zero(value))
-                or (name in {"color", "background-color"} and self._has_transparent_color(value))
+                or (name == "font-size" and self._is_zero(value))
+                or visibility_proof is _VisibilityProof.HIDDEN
                 or (name == "transform" and "translate" in serialized)
-                or (name == "filter" and self._has_zero_filter_opacity(value))
             ):
                 hidden = True
             if name in {"left", "right", "top", "bottom", "text-indent"}:
