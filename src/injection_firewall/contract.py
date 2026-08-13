@@ -1,11 +1,10 @@
 """Closed, public result types for document scans."""
 
 from collections.abc import Iterable
-from dataclasses import dataclass
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, StringConstraints, model_validator
 
 LOCATION_PATTERN = (
     r"^(?:"
@@ -19,6 +18,7 @@ LOCATION_PATTERN = (
     r"|file:metadata"
     r")$"
 )
+Location = Annotated[str, StringConstraints(pattern=LOCATION_PATTERN)]
 
 
 class RiskLevel(StrEnum):
@@ -70,14 +70,36 @@ RISK_ORDER = {
     RiskLevel.REVIEW: 1,
     RiskLevel.QUARANTINE: 2,
 }
+MINIMUM_RISK_BY_EVIDENCE = {
+    EvidenceCode.PARSER_FAILURE: RiskLevel.QUARANTINE,
+    EvidenceCode.SCANNER_DEPENDENCY_UNAVAILABLE: RiskLevel.REVIEW,
+    EvidenceCode.RESOURCE_LIMIT_EXCEEDED: RiskLevel.QUARANTINE,
+}
 
 
-@dataclass(frozen=True, slots=True)
-class Finding:
+class Finding(BaseModel):
+    """An immutable, validated internal observation from a scanner."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     risk_level: RiskLevel
     evidence: EvidenceCode
-    location: str
+    location: Location
     anomaly: AnomalyCode | None = None
+
+    def __init__(
+        self,
+        risk_level: RiskLevel,
+        evidence: EvidenceCode,
+        location: Location,
+        anomaly: AnomalyCode | None = None,
+    ) -> None:
+        super().__init__(
+            risk_level=risk_level,
+            evidence=evidence,
+            location=location,
+            anomaly=anomaly,
+        )
 
 
 class ScanResult(BaseModel):
@@ -87,20 +109,26 @@ class ScanResult(BaseModel):
 
     risk_level: RiskLevel
     evidence: tuple[EvidenceCode, ...] = ()
-    location: tuple[Annotated[str, StringConstraints(pattern=LOCATION_PATTERN)], ...] = ()
+    location: tuple[Location, ...] = ()
     structural_anomalies: tuple[AnomalyCode, ...] = ()
 
     @classmethod
     def from_findings(cls, findings: Iterable[Finding]) -> "ScanResult":
         items = tuple(findings)
-        risk = max(
+        evidence = tuple(sorted({item.evidence for item in items}, key=str))
+        finding_risk = max(
             (item.risk_level for item in items),
             default=RiskLevel.LOW,
             key=lambda value: RISK_ORDER[value],
         )
+        minimum_risk = max(
+            (MINIMUM_RISK_BY_EVIDENCE.get(item, RiskLevel.LOW) for item in evidence),
+            default=RiskLevel.LOW,
+            key=lambda value: RISK_ORDER[value],
+        )
         return cls(
-            risk_level=risk,
-            evidence=tuple(sorted({item.evidence for item in items}, key=str)),
+            risk_level=max((finding_risk, minimum_risk), key=lambda value: RISK_ORDER[value]),
+            evidence=evidence,
             location=tuple(sorted({item.location for item in items})),
             structural_anomalies=tuple(
                 sorted(
@@ -109,6 +137,17 @@ class ScanResult(BaseModel):
                 )
             ),
         )
+
+    @model_validator(mode="after")
+    def enforces_evidence_minimum_risk(self) -> Self:
+        minimum_risk = max(
+            (MINIMUM_RISK_BY_EVIDENCE.get(item, RiskLevel.LOW) for item in self.evidence),
+            default=RiskLevel.LOW,
+            key=lambda value: RISK_ORDER[value],
+        )
+        if RISK_ORDER[self.risk_level] < RISK_ORDER[minimum_risk]:
+            raise ValueError("risk level is below the evidence minimum")
+        return self
 
     def to_public_dict(self) -> dict[str, object]:
         return self.model_dump(mode="json")

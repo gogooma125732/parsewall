@@ -31,3 +31,56 @@ def test_result_rejects_extra_fields_and_unbounded_location():
             "risk_level": "low", "evidence": [], "location": ["../../secret"],
             "structural_anomalies": [], "extra": "forbidden",
         })
+
+
+@pytest.mark.parametrize(
+    ("evidence", "minimum_risk"),
+    [
+        (EvidenceCode.PARSER_FAILURE, RiskLevel.QUARANTINE),
+        (EvidenceCode.SCANNER_DEPENDENCY_UNAVAILABLE, RiskLevel.REVIEW),
+        (EvidenceCode.RESOURCE_LIMIT_EXCEEDED, RiskLevel.QUARANTINE),
+    ],
+)
+def test_direct_result_rejects_failure_evidence_below_minimum_risk(
+    evidence: EvidenceCode, minimum_risk: RiskLevel
+):
+    with pytest.raises(ValidationError):
+        ScanResult(
+            risk_level=RiskLevel.LOW,
+            evidence=(evidence,),
+            location=("file:metadata",),
+        )
+
+
+@pytest.mark.parametrize(
+    ("evidence", "minimum_risk"),
+    [
+        (EvidenceCode.PARSER_FAILURE, RiskLevel.QUARANTINE),
+        (EvidenceCode.SCANNER_DEPENDENCY_UNAVAILABLE, RiskLevel.REVIEW),
+        (EvidenceCode.RESOURCE_LIMIT_EXCEEDED, RiskLevel.QUARANTINE),
+    ],
+)
+def test_from_findings_raises_failure_evidence_to_minimum_risk(
+    evidence: EvidenceCode, minimum_risk: RiskLevel
+):
+    result = ScanResult.from_findings([
+        Finding(RiskLevel.LOW, evidence, "file:metadata"),
+    ])
+    assert result.risk_level is minimum_risk
+
+
+def test_from_findings_selects_most_restrictive_caller_risk():
+    result = ScanResult.from_findings([
+        Finding(RiskLevel.LOW, EvidenceCode.METADATA_INSTRUCTION_PATTERN, "file:metadata"),
+        Finding(RiskLevel.QUARANTINE, EvidenceCode.VISIBLE_INSTRUCTION_PATTERN, "text:line=4"),
+    ])
+    assert result.risk_level is RiskLevel.QUARANTINE
+
+
+def test_finding_rejects_invalid_runtime_values_and_is_immutable():
+    with pytest.raises(ValidationError):
+        Finding("invalid", EvidenceCode.VISIBLE_INSTRUCTION_PATTERN, "text:line=4")
+
+    finding = Finding(RiskLevel.LOW, EvidenceCode.VISIBLE_INSTRUCTION_PATTERN, "text:line=4")
+    with pytest.raises(ValidationError):
+        finding.risk_level = RiskLevel.REVIEW
