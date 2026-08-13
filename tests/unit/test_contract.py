@@ -46,6 +46,7 @@ def test_result_accepts_the_coarse_structure_location():
         (EvidenceCode.PARSER_FAILURE, RiskLevel.QUARANTINE),
         (EvidenceCode.SCANNER_DEPENDENCY_UNAVAILABLE, RiskLevel.REVIEW),
         (EvidenceCode.RESOURCE_LIMIT_EXCEEDED, RiskLevel.QUARANTINE),
+        (EvidenceCode.RESULT_INTEGRITY_FAILURE, RiskLevel.QUARANTINE),
     ],
 )
 def test_direct_result_rejects_failure_evidence_below_minimum_risk(
@@ -65,6 +66,7 @@ def test_direct_result_rejects_failure_evidence_below_minimum_risk(
         (EvidenceCode.PARSER_FAILURE, RiskLevel.QUARANTINE),
         (EvidenceCode.SCANNER_DEPENDENCY_UNAVAILABLE, RiskLevel.REVIEW),
         (EvidenceCode.RESOURCE_LIMIT_EXCEEDED, RiskLevel.QUARANTINE),
+        (EvidenceCode.RESULT_INTEGRITY_FAILURE, RiskLevel.QUARANTINE),
     ],
 )
 def test_from_findings_raises_failure_evidence_to_minimum_risk(

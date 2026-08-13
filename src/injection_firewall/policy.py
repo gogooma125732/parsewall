@@ -5,8 +5,9 @@ import tarfile
 import zipfile
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from re import fullmatch
 
-from .contract import EvidenceCode, Finding, Location, RiskLevel, ScanResult
+from .contract import LOCATION_PATTERN, EvidenceCode, Finding, RiskLevel, ScanResult
 
 
 class FailureKind(StrEnum):
@@ -49,12 +50,17 @@ def failure_kind_for_exception(error: BaseException) -> FailureKind:
     return FailureKind.UNKNOWN
 
 
-def failure_finding(kind: FailureKind, location: Location = "file:structure") -> Finding:
+def failure_finding(kind: FailureKind, location: str = "file:structure") -> Finding:
     """Create an opaque, fail-closed finding for an internal scanner failure."""
+    safe_location = (
+        location
+        if isinstance(location, str) and fullmatch(LOCATION_PATTERN, location)
+        else "file:structure"
+    )
     return Finding(
         RiskLevel.QUARANTINE,
         FAILURE_EVIDENCE[kind],
-        location,
+        safe_location,
     )
 
 

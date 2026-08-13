@@ -54,6 +54,11 @@ def test_failure_finding_uses_closed_quarantine_evidence(kind, evidence):
     assert finding.location == "file:structure"
 
 
+def test_failure_finding_coarsens_an_invalid_location():
+    finding = failure_finding(FailureKind.UNKNOWN, "../../untrusted-document-name")
+    assert finding.location == "file:structure"
+
+
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
