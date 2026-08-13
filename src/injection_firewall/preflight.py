@@ -139,6 +139,27 @@ class _SnapshotReader:
     def fileno(self) -> int:
         return self._read_only_descriptor
 
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        size = os.fstat(self._snapshot_descriptor).st_size
+        if whence == os.SEEK_SET:
+            position = offset
+        elif whence == os.SEEK_CUR:
+            position = self._position + offset
+        elif whence == os.SEEK_END:
+            position = size + offset
+        else:
+            raise ValueError("invalid seek mode")
+        if position < 0:
+            raise ValueError("negative seek position")
+        self._position = position
+        return position
+
+    def tell(self) -> int:
+        return self._position
+
+    def seekable(self) -> bool:
+        return True
+
     def close(self) -> None:
         if self._read_only_descriptor >= 0:
             os.close(self._read_only_descriptor)
