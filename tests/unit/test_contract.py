@@ -33,6 +33,13 @@ def test_result_rejects_extra_fields_and_unbounded_location():
         })
 
 
+def test_result_accepts_the_coarse_structure_location():
+    result = ScanResult.from_findings([
+        Finding(RiskLevel.QUARANTINE, EvidenceCode.PARSER_FAILURE, "file:structure"),
+    ])
+    assert result.location == ("file:structure",)
+
+
 @pytest.mark.parametrize(
     ("evidence", "minimum_risk"),
     [

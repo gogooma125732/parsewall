@@ -16,6 +16,7 @@ LOCATION_PATTERN = (
     r"|text:line=[1-9][0-9]{0,8}"
     r"|image:region=[1-9][0-9]{0,8}"
     r"|file:metadata"
+    r"|file:structure"
     r")$"
 )
 Location = Annotated[str, StringConstraints(pattern=LOCATION_PATTERN)]
@@ -151,3 +152,13 @@ class ScanResult(BaseModel):
 
     def to_public_dict(self) -> dict[str, object]:
         return self.model_dump(mode="json")
+
+    def raise_to(self, risk_level: RiskLevel) -> "ScanResult":
+        """Return a result whose verdict is at least as restrictive as this one."""
+        return self.model_copy(
+            update={
+                "risk_level": max(
+                    (self.risk_level, risk_level), key=lambda value: RISK_ORDER[value]
+                )
+            }
+        )
