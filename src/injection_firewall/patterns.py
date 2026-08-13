@@ -37,14 +37,19 @@ def strip_directional_controls(text: str) -> str:
     return text.translate(_CONTROL_TRANSLATION)
 
 
-def normalize_visible_text(text: str) -> str:
+def normalize_visible_text(
+    text: str, *, check_deadline: Callable[[], None] | None = None
+) -> str:
     """Normalize text while retaining ordinary tab and line-ending structure."""
     normalized = strip_directional_controls(unicodedata.normalize("NFKC", text))
-    return "".join(
-        character
-        for character in normalized
-        if character in {"\t", "\n", "\r"} or unicodedata.category(character) not in {"Cc", "Cf"}
-    )
+    visible: list[str] = []
+    for index, character in enumerate(normalized):
+        if index % 256 == 0:
+            _check(check_deadline)
+        if character in {"\t", "\n", "\r"} or unicodedata.category(character) not in {"Cc", "Cf"}:
+            visible.append(character)
+    _check(check_deadline)
+    return "".join(visible)
 
 
 def anomalies_in(text: str) -> tuple[AnomalyCode, ...]:
@@ -113,12 +118,14 @@ def encoded_block_findings(
     findings: list[Finding] = []
     candidate: list[str] = []
     payload_length = 0
+    segment_length = 0
 
     def flush() -> None:
-        nonlocal candidate, payload_length
+        nonlocal candidate, payload_length, segment_length
         if payload_length < _ENCODED_MINIMUM:
             candidate = []
             payload_length = 0
+            segment_length = 0
             return
         _check(check_deadline)
         encoded = "".join(candidate)
@@ -141,17 +148,20 @@ def encoded_block_findings(
         )
         candidate = []
         payload_length = 0
+        segment_length = 0
 
     for index, character in enumerate(text):
         if index % 256 == 0:
             _check(check_deadline)
         if character in _ENCODED_ALPHABET:
             payload_length += 1
+            segment_length += 1
             if len(candidate) < _ENCODED_DECODE_MAXIMUM:
                 candidate.append(character)
-        elif character in {"\n", "\r", "\t"} and payload_length:
+        elif character in {" ", "\n", "\r", "\t"} and payload_length and segment_length >= 16:
             if len(candidate) < _ENCODED_DECODE_MAXIMUM:
                 candidate.append(character)
+            segment_length = 0
         else:
             flush()
     flush()

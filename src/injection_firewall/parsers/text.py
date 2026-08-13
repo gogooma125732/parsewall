@@ -1,6 +1,8 @@
 """Scanner for preflight-verified plain text and Markdown."""
 
 import re
+from html import unescape
+from itertools import chain
 from urllib.parse import urlsplit
 
 from ..contract import AnomalyCode, EvidenceCode, Finding, RiskLevel
@@ -22,6 +24,9 @@ _ACTIVE_HTML = re.compile(r"<\s*(?:script|iframe|object|embed)\b|\son[A-Za-z0-9_
 _HIDDEN_HTML = re.compile(r"\b(?:hidden|style|aria-hidden)\s*=", re.IGNORECASE)
 _MARKDOWN_LINK = re.compile(
     r"!?\[[^\]\r\n]{0,4096}\]\(\s*(?:<([^>\r\n]{1,8192})>|([^\s)\r\n]{1,8192}))",
+)
+_MARKDOWN_REFERENCE = re.compile(
+    r"(?m)^[ \t]{0,3}\[[^\]\r\n]{1,4096}\]:[ \t]*(?:<([^>\r\n]{1,8192})>|([^\s\r\n]{1,8192}))"
 )
 _ACTIVE_SCHEMES = frozenset({"data", "file", "javascript", "vbscript"})
 
@@ -55,9 +60,9 @@ def _add_markdown_findings(
                     AnomalyCode.DOM_HIDDEN_CONTENT,
                 )
             )
-    for match in _MARKDOWN_LINK.finditer(contents):
+    for match in chain(_MARKDOWN_LINK.finditer(contents), _MARKDOWN_REFERENCE.finditer(contents)):
         deadline.check()
-        destination = (match.group(1) or match.group(2) or "").strip()
+        destination = unescape((match.group(1) or match.group(2) or "").strip())
         parsed = urlsplit(destination)
         if parsed.scheme.casefold() in _ACTIVE_SCHEMES:
             suppress_derivative = True
@@ -88,6 +93,10 @@ def scan_text(source: VerifiedSource, limits: ScanLimits) -> ParserOutput:
         contents = read_verified_text(source, limits, deadline)
         findings: list[Finding] = []
         suppress_derivative = _add_markdown_findings(contents, findings, deadline)
+        if has_disallowed_controls(contents):
+            findings.append(
+                Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, "text:line=1")
+            )
         for number, line in enumerate(contents.splitlines(), start=1):
             deadline.check()
             location = f"text:line={number}"
@@ -95,20 +104,20 @@ def scan_text(source: VerifiedSource, limits: ScanLimits) -> ParserOutput:
                 findings.append(
                     Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, location, anomaly)
                 )
-            if has_disallowed_controls(line):
-                findings.append(
-                    Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, location)
-                )
             findings.extend(
                 classify_instruction(line, hidden=False, location=location, check_deadline=deadline.check)
             )
-        findings.extend(
-            encoded_block_findings(contents, location="text:line=1", check_deadline=deadline.check)
+        encoded_findings = encoded_block_findings(
+            contents, location="text:line=1", check_deadline=deadline.check
+        )
+        findings.extend(encoded_findings)
+        derivative = "" if suppress_derivative or encoded_findings else normalize_visible_text(
+            contents, check_deadline=deadline.check
         )
         deadline.check()
         return ParserOutput(
             tuple(findings),
-            "" if suppress_derivative else normalize_visible_text(contents),
+            derivative,
             frozenset({_TEXT_CHECK}),
             frozenset({_TEXT_CHECK}),
         )

@@ -136,7 +136,12 @@ class _VisibleHtml(HTMLParser):
                 self._inspect_url(str(getattr(token, "value", "")), location)
             if token_type == "function":
                 if getattr(token, "lower_name", "") == "url":
-                    self._inspect_url(tinycss2.serialize(getattr(token, "arguments", [])).strip(), location)
+                    arguments = list(getattr(token, "arguments", []))
+                    if len(arguments) == 1 and getattr(arguments[0], "type", "") == "string":
+                        url_value = str(getattr(arguments[0], "value", ""))
+                    else:
+                        url_value = tinycss2.serialize(arguments).strip().strip("'\"")
+                    self._inspect_url(url_value, location)
                 self._inspect_tokens_for_urls(list(getattr(token, "arguments", [])), location)
 
     @staticmethod
@@ -153,7 +158,11 @@ class _VisibleHtml(HTMLParser):
             if getattr(token, "type", "") == "ident" and getattr(token, "value", "").casefold() == "transparent":
                 return True
             if getattr(token, "type", "") == "function" and getattr(token, "lower_name", "") in {"rgba", "hsla"}:
-                arguments = [item for item in getattr(token, "arguments", []) if getattr(item, "type", "") == "number"]
+                arguments = [
+                    item
+                    for item in getattr(token, "arguments", [])
+                    if getattr(item, "type", "") in {"number", "percentage"}
+                ]
                 if arguments and getattr(arguments[-1], "value", None) == 0:
                     return True
         return False
@@ -170,6 +179,26 @@ class _VisibleHtml(HTMLParser):
             value = list(getattr(declaration, "value", []))
             self._inspect_tokens_for_urls(value, location)
             serialized = tinycss2.serialize(value).strip().casefold()
+            has_var = any(
+                getattr(token, "type", "") == "function" and getattr(token, "lower_name", "") == "var"
+                for token in value
+            )
+            if has_var and name in {
+                "display",
+                "visibility",
+                "opacity",
+                "font-size",
+                "color",
+                "background-color",
+                "transform",
+                "left",
+                "right",
+                "top",
+                "bottom",
+                "text-indent",
+            }:
+                self.suppress_derivative = True
+                hidden = True
             if (
                 (name == "display" and serialized == "none")
                 or (name == "visibility" and serialized in {"hidden", "collapse"})
@@ -322,6 +351,8 @@ class _VisibleHtml(HTMLParser):
         self.findings.extend(encoded_block_findings(data, location=location, check_deadline=self.deadline.check))
 
     def handle_decl(self, decl: str) -> None:
+        if decl.casefold() == "doctype html":
+            return
         raise ValueError("HTML declarations are not supported")
 
     def unknown_decl(self, data: str) -> None:
@@ -334,9 +365,13 @@ class _VisibleHtml(HTMLParser):
         self.deadline.check()
         if self._stack:
             raise ValueError("unterminated HTML element")
+        for index in range(0, len(self.visible_parts), 64):
+            self.deadline.check()
+        derivative = "" if self.suppress_derivative else " ".join(self.visible_parts)
+        self.deadline.check()
         return ParserOutput(
             tuple(self.findings),
-            "" if self.suppress_derivative else " ".join(self.visible_parts),
+            derivative,
             frozenset({_HTML_CHECK}),
             frozenset({_HTML_CHECK}),
         )
@@ -359,7 +394,11 @@ def scan_html(source: VerifiedSource, limits: ScanLimits) -> ParserOutput:
         parser = _VisibleHtml(deadline)
         parser.preload_stylesheets(contents)
         parser.feed(contents)
+        if parser.rawdata:
+            raise ValueError("unterminated HTML lexical input")
         parser.close()
-        return parser.close_output()
+        output = parser.close_output()
+        deadline.check()
+        return output
     except Exception as error:  # noqa: BLE001 -- public security boundary sanitizes all ordinary failures.
         return _failure_output(error)
