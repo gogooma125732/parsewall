@@ -194,9 +194,7 @@ def test_engine_parser_cannot_be_downgraded_by_replacing_snapshot_path(
 
     def replace_snapshot_then_scan(verified, limits, **kwargs):
         snapshot = verified._snapshot_path
-        assert snapshot is not None
-        snapshot.unlink()
-        snapshot.write_text(("ordinary report " * 3)[: len(attack)], encoding="utf-8")
+        assert snapshot is None
         return real_scan_text(verified, limits, **kwargs)
 
     monkeypatch.setattr("injection_firewall.engine.scan_text", replace_snapshot_then_scan)

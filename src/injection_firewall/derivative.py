@@ -126,6 +126,14 @@ def _replace(directory_fd: int, prepared: _Prepared, destination: str) -> None:
     info = os.fstat(prepared.descriptor)
     if (info.st_dev, info.st_ino) != prepared.identity or stat.S_IMODE(info.st_mode) != 0o600:
         raise OSError("output identity changed")
+    named = os.stat(prepared.name, dir_fd=directory_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(named.st_mode)
+        or named.st_nlink != 1
+        or stat.S_IMODE(named.st_mode) != 0o600
+        or (named.st_dev, named.st_ino) != prepared.identity
+    ):
+        raise OSError("output path identity changed")
     _slot_info(directory_fd, destination)
     os.replace(prepared.name, destination, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
     _fsync_directory(directory_fd)
@@ -155,6 +163,8 @@ def publish_result(
     result_file: _Prepared | None = None
     derivative_released = False
     try:
+        if visible_text is not None and result.risk_level is not RiskLevel.LOW:
+            raise ValueError("derivative denied")
         if result_path is not None:
             _validate_external_result(result_path, output_dir)
         _slot_info(directory_fd, RESULT_NAME)

@@ -594,11 +594,19 @@ def verify_source(path: Path, limits: ScanLimits) -> VerifiedSource:
             snapshot.flush()
             os.fsync(snapshot.fileno())
             os.fchmod(snapshot.fileno(), stat.S_IRUSR)
-            snapshot_descriptor = os.dup(snapshot.fileno())
+            snapshot_info = os.fstat(snapshot.fileno())
+            snapshot_descriptor = os.open(
+                snapshot_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            )
+            readonly_info = os.fstat(snapshot_descriptor)
+            if not _same_identity(snapshot_info, readonly_info) or readonly_info.st_size != opened.st_size:
+                os.close(snapshot_descriptor)
+                return VerifiedSource(_failed_report(EvidenceCode.CORRUPT_DOCUMENT, size=opened.st_size), None)
             snapshot.close()
             snapshot = None
+            snapshot_path.unlink()
             handed_off = True
-            return VerifiedSource(report, snapshot_path, snapshot_descriptor)
+            return VerifiedSource(report, None, snapshot_descriptor)
         except (MemoryError, OSError, RuntimeError, ValueError) as error:
             return VerifiedSource(_failure_report(error, size=opened.st_size), None)
         finally:

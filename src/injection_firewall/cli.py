@@ -53,26 +53,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (SystemExit, ValueError):
         sys.stderr.write("scan arguments invalid\n")
         return 2
-    if not _result_destination_is_safe(args.input, args.output_dir, args.result):
-        sys.stderr.write("scan output failed\n")
-        return 1
     try:
+        if not _result_destination_is_safe(args.input, args.output_dir, args.result):
+            raise ValueError("unsafe output")
         artifacts = scan_file(args.input, args.output_dir, ScanLimits())
-    except Exception:  # noqa: BLE001 -- CLI boundary is deliberately opaque.
-        sys.stderr.write("scan failed\n")
-        return 1
-    try:
         write_result(args.result, artifacts.result)
-    except Exception:  # noqa: BLE001 -- user-facing diagnostics must stay source-free.
+        payload = compact_result_json(artifacts.result)
+        written = 0
+        while written < len(payload):
+            count = sys.stdout.buffer.write(payload[written:])
+            if count is None or count <= 0:
+                raise OSError("stdout write failed")
+            written += count
+        sys.stdout.buffer.flush()
+    except Exception:  # noqa: BLE001 -- public CLI boundary must stay source-free.
         try:
             publish_result(args.output_dir, quarantine_result(), None)
         except Exception:  # noqa: BLE001, S110 -- diagnostics cannot expose recovery details.
             pass
-        sys.stderr.write("scan output failed\n")
-        return 1
-    try:
-        sys.stdout.buffer.write(compact_result_json(artifacts.result))
-    except Exception:  # noqa: BLE001 -- stdout failures must not leak context.
         sys.stderr.write("scan output failed\n")
         return 1
     return 0
