@@ -39,3 +39,14 @@ Endpoints:
 Supported inputs are UTF-8/UTF-16 text, Markdown, HTML, DOCX, PPTX, XLSX, PDF,
 PNG, and JPEG. Unsupported, corrupt, encrypted, incomplete, or dependency-
 blocked scans fail closed.
+
+## Codex plugin and MCP
+
+The distributable plugin is under `plugins/document-injection-firewall`. It
+contains the `inspect-untrusted-files` skill, a `PreToolUse` hook that blocks
+local raw-document reads, and an optional root-confined stdio MCP service.
+
+Codex's current `UserPromptSubmit` hook schema exposes prompt text but not an
+attachment list, so the hook cannot claim to intercept native attachment
+ingestion. It is a local-tool guardrail; the skill and MCP workflow remain the
+mandatory pre-read gate.

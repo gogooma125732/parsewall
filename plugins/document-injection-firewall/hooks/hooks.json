@@ -1,0 +1,18 @@
+{
+  "description": "Block local tools from reading unscanned document paths.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/hooks/prevent_raw_document_reads.py\"",
+            "timeout": 5,
+            "statusMessage": "Checking document-read boundary"
+          }
+        ]
+      }
+    ]
+  }
+}

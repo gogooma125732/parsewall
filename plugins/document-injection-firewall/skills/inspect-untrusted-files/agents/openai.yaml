@@ -1,0 +1,4 @@
+interface:
+  display_name: "Inspect Untrusted Files"
+  short_description: "Scan attached files before model access"
+  default_prompt: "Use $inspect-untrusted-files to scan this file before reading it."

@@ -1,0 +1,58 @@
+%PDF-1.3
+%‚„œ”
+1 0 obj
+<<
+/Producer (pypdf)
+>>
+endobj
+2 0 obj
+<<
+/Type /Pages
+/Count 1
+/Kids [ 4 0 R ]
+>>
+endobj
+3 0 obj
+<<
+/Type /Catalog
+/Pages 2 0 R
+/Names <<
+/JavaScript <<
+/Names [ (d46a55d1\0554234\05542d2\055baf3\055032aa448d33a) 5 0 R ]
+>>
+>>
+>>
+endobj
+4 0 obj
+<<
+/Type /Page
+/Resources <<
+>>
+/MediaBox [ 0.0 0.0 100 100 ]
+/Parent 2 0 R
+>>
+endobj
+5 0 obj
+<<
+/Type /Action
+/S /JavaScript
+/JS (app\056alert\050\047inert fixture\047\051)
+>>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000054 00000 n 
+0000000113 00000 n 
+0000000261 00000 n 
+0000000355 00000 n 
+trailer
+<<
+/Size 6
+/Root 3 0 R
+/Info 1 0 R
+>>
+startxref
+453
+%%EOF

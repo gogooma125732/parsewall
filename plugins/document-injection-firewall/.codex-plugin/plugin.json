@@ -1,0 +1,22 @@
+{
+  "name": "document-injection-firewall",
+  "version": "0.1.0",
+  "description": "Fail-closed inspection before Codex reads untrusted documents",
+  "author": {
+    "name": "Document Injection Firewall maintainers"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Document Injection Firewall",
+    "shortDescription": "Scan untrusted files before model access.",
+    "longDescription": "Deterministically inspect uploaded files, block raw document reads, and release only marked plain text for low-risk results.",
+    "developerName": "Document Injection Firewall maintainers",
+    "category": "Developer Tools",
+    "capabilities": ["File inspection", "Prompt-injection guardrail"],
+    "defaultPrompt": [
+      "Scan this attachment before reading it.",
+      "Inspect this document for hidden instructions."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
   "defusedxml>=0.7.1",
   "fastapi>=0.116",
+  "mcp>=1.13",
   "Pillow>=11.0",
   "pydantic>=2.0",
   "pypdf>=5.0",
@@ -23,6 +24,7 @@ dependencies = [
 document-firewall = "injection_firewall.cli:main"
 document-firewall-api = "injection_firewall.api:main"
 document-firewall-worker = "injection_firewall.worker:main"
+document-firewall-mcp = "injection_firewall.mcp_server:main"
 
 [dependency-groups]
 dev = [

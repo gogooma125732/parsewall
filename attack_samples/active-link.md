@@ -1,0 +1,1 @@
+[ordinary report](javascript:alert(1))
