@@ -212,6 +212,21 @@ def test_verified_source_readers_are_read_only_and_independent(tmp_path: Path):
             os.write(first.fileno(), b"!")
 
 
+def test_strict_utf_html_is_a_verified_text_snapshot_but_binary_html_fails_closed(tmp_path: Path):
+    valid = tmp_path / "report.html"
+    invalid = tmp_path / "payload.html"
+    valid.write_text("<p>Quarterly report</p>", encoding="utf-8")
+    invalid.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    with verify_source(valid, ScanLimits()) as verified:
+        assert verified.report.format is DocumentFormat.TEXT
+        assert verified.report.findings == ()
+        with verified.open() as snapshot:
+            assert snapshot.read() == b"<p>Quarterly report</p>"
+    with verify_source(invalid, ScanLimits()) as verified:
+        assert verified.report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
+
+
 def test_ordinary_oversized_zip_member_is_rejected(tmp_path: Path):
     source = tmp_path / "oversized.docx"
     write_docx(source, WORD_TYPES, ("word/document.xml", b"x" * 17))
