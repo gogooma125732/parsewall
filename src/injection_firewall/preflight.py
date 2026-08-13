@@ -417,7 +417,7 @@ def _inspect_zip(
 
 
 _EXTENSIONS = {
-    DocumentFormat.TEXT: frozenset({".txt", ".text", ".md", ".csv", ".htm", ".html"}),
+    DocumentFormat.TEXT: frozenset({".txt", ".text", ".md", ".markdown", ".csv", ".htm", ".html"}),
     DocumentFormat.PDF: frozenset({".pdf"}),
     DocumentFormat.ZIP: frozenset({".zip"}),
     DocumentFormat.DOCX: frozenset({".docx"}),

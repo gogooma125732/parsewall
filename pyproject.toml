@@ -9,6 +9,9 @@ description = "Closed result contract for document injection scanning"
 requires-python = ">=3.11"
 dependencies = ["defusedxml>=0.7.1", "pydantic>=2.0", "tinycss2>=1.5.1"]
 
+[project.scripts]
+document-firewall = "injection_firewall.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/injection_firewall"]
 
