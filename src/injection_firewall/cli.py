@@ -1,15 +1,21 @@
 """Local command-line adapter for the closed scanner result contract."""
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
 from .derivative import (
+    close_installed_result,
+    close_publication,
     compact_result_json,
-    publish_result,
-    quarantine_result,
+    destination_available,
+    installed_result_is_current,
+    publication_is_current,
+    revoke_installed_result,
+    revoke_publication,
     write_result,
 )
 from .engine import scan_file
@@ -32,17 +38,15 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
 
 
 def _result_destination_is_safe(input_path: Path, output_dir: Path, result_path: Path) -> bool:
-    """Reject canonical, hard-link, and fixed-slot aliases before scanning."""
+    """Reject occupied targets and lexical overlap before any scan side effect."""
     try:
-        if result_path.is_symlink() or result_path.resolve(strict=False) in {
-            input_path.resolve(strict=False),
-            (output_dir / "result.json").resolve(strict=False),
-            (output_dir / "visible.txt").resolve(strict=False),
-        }:
+        output_absolute = os.path.abspath(os.fspath(output_dir))
+        result_absolute = os.path.abspath(os.fspath(result_path))
+        if result_absolute == output_absolute or result_absolute.startswith(output_absolute + os.sep):
             return False
-        if result_path.exists() and input_path.exists() and result_path.samefile(input_path):
+        if not destination_available(output_dir) or not destination_available(result_path):
             return False
-    except OSError:
+    except (OSError, ValueError):
         return False
     return True
 
@@ -53,11 +57,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (SystemExit, ValueError):
         sys.stderr.write("scan arguments invalid\n")
         return 2
+    installed_result = None
+    artifacts = None
     try:
         if not _result_destination_is_safe(args.input, args.output_dir, args.result):
             raise ValueError("unsafe output")
         artifacts = scan_file(args.input, args.output_dir, ScanLimits())
-        write_result(args.result, artifacts.result)
+        installed_result = write_result(args.result, artifacts.result)
+        if not publication_is_current(artifacts._publication) or not installed_result_is_current(
+            installed_result
+        ):
+            raise OSError("public output changed")
         payload = compact_result_json(artifacts.result)
         written = 0
         while written < len(payload):
@@ -67,12 +77,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             written += count
         sys.stdout.buffer.flush()
     except Exception:  # noqa: BLE001 -- public CLI boundary must stay source-free.
-        try:
-            publish_result(args.output_dir, quarantine_result(), None)
-        except Exception:  # noqa: BLE001, S110 -- diagnostics cannot expose recovery details.
-            pass
+        revoke_installed_result(installed_result)
+        revoke_publication(artifacts._publication if artifacts is not None else None)
         sys.stderr.write("scan output failed\n")
         return 1
+    close_installed_result(installed_result)
+    close_publication(artifacts._publication if artifacts is not None else None)
     return 0
 
 

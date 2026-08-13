@@ -1,10 +1,15 @@
 """Scanner orchestration that preserves verified source snapshots through parsing."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contract import RiskLevel, ScanResult
-from .derivative import publish_result
+from .derivative import (
+    Publication,
+    _publish_result,
+    close_publication,
+    destination_available,
+)
 from .limits import ScanLimits
 from .parsers.html import scan_html
 from .parsers.text import scan_text
@@ -18,6 +23,10 @@ class ScanArtifacts:
 
     result: ScanResult
     derivative_path: Path | None
+    _publication: Publication | None = field(default=None, repr=False, compare=False)
+
+    def __del__(self) -> None:
+        close_publication(self._publication)
 
 
 def _failed_result(error: BaseException) -> ScanResult:
@@ -41,23 +50,12 @@ def _scan_verified(
     return result, output.visible_text if result.risk_level is RiskLevel.LOW else None
 
 
-def _reject_output_aliases(source: Path, output_dir: Path) -> None:
-    """Reject source/output collisions before any scanner output is opened."""
-    if output_dir.exists() and output_dir.is_symlink():
-        raise ValueError("output unavailable")
-    for slot in (output_dir / "result.json", output_dir / "visible.txt"):
-        try:
-            if source.samefile(slot):
-                raise ValueError("output unavailable")
-        except FileNotFoundError:
-            continue
-
-
 def scan_file(source: Path, output_dir: Path, limits: ScanLimits) -> ScanArtifacts:
     """Scan one source and publish only a safe, marker-prefixed low-risk derivative."""
     visible_text: str | None = None
+    if not destination_available(output_dir):
+        return ScanArtifacts(_failed_result(ValueError("output unavailable")), None)
     try:
-        _reject_output_aliases(source, output_dir)
         with verify_source(source, limits) as verified:
             result, visible_text = _scan_verified(verified, limits, source.suffix.casefold())
     except Exception as error:  # noqa: BLE001 -- scanner boundary must fail closed.
@@ -65,12 +63,12 @@ def scan_file(source: Path, output_dir: Path, limits: ScanLimits) -> ScanArtifac
         visible_text = None
 
     try:
-        derivative_path = publish_result(output_dir, result, visible_text)
+        publication = _publish_result(output_dir, result, visible_text)
     except Exception as error:  # noqa: BLE001 -- a failed release must not remain low.
         failure = _failed_result(error)
         try:
-            publish_result(output_dir, failure, None)
-        except Exception:  # noqa: BLE001, S110 -- a broken recovery path remains fail-closed.
-            pass
-        return ScanArtifacts(failure, None)
-    return ScanArtifacts(result, derivative_path)
+            publication = _publish_result(output_dir, failure, None)
+        except Exception:  # noqa: BLE001 -- a broken recovery path remains fail-closed.
+            return ScanArtifacts(failure, None)
+        return ScanArtifacts(failure, None, publication)
+    return ScanArtifacts(result, publication.derivative_path, publication)
