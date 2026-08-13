@@ -290,13 +290,13 @@ def _failure_output(error: Exception) -> ParserOutput:
     )
 
 
-def scan_text(source: VerifiedSource, limits: ScanLimits) -> ParserOutput:
-    """Scan a verified text/Markdown snapshot without reopening the caller path."""
+def scan_text(source: VerifiedSource, limits: ScanLimits, *, markdown: bool = True) -> ParserOutput:
+    """Scan a verified text snapshot, optionally applying Markdown-specific checks."""
     try:
         deadline = Deadline.from_limits(limits)
         contents = read_verified_text(source, limits, deadline)
         findings: list[Finding] = []
-        suppress_derivative = _add_markdown_findings(contents, findings, deadline)
+        suppress_derivative = _add_markdown_findings(contents, findings, deadline) if markdown else False
         if has_disallowed_controls(contents):
             findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, "text:line=1"))
         for number, line in enumerate(contents.splitlines(), start=1):

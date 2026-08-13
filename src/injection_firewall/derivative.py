@@ -1,11 +1,13 @@
-"""Private, validated publication for scanner results and visible-text derivatives."""
+"""Descriptor-relative, fail-closed publication for scanner outputs."""
 
 import json
 import os
-import tempfile
+import secrets
+import stat
+from dataclasses import dataclass
 from pathlib import Path
 
-from .contract import ScanResult
+from .contract import EvidenceCode, RiskLevel, ScanResult
 
 RESULT_NAME = "result.json"
 DERIVATIVE_NAME = "visible.txt"
@@ -15,123 +17,189 @@ UNTRUSTED_MARKER = (
 )
 
 
-def _fsync_directory(directory: Path) -> None:
-    """Persist a completed rename where the platform supports directory fsync."""
-    try:
-        descriptor = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        try:
-            os.fsync(descriptor)
-        except OSError:
-            pass
-    finally:
-        os.close(descriptor)
-
-
-def _prepare_private_file(destination: Path, contents: bytes) -> Path:
-    """Write, fsync, and reopen a private sibling before it becomes visible."""
-    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".pending-", dir=destination.parent)
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as writer:
-            descriptor = -1
-            writer.write(contents)
-            writer.flush()
-            os.fsync(writer.fileno())
-        if temporary.read_bytes() != contents:
-            raise OSError("published output validation failed")
-        return temporary
-    except BaseException:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-        raise
-
-
-def _replace_prepared(temporary: Path, destination: Path) -> None:
-    os.replace(temporary, destination)
-    os.chmod(destination, 0o600)
-    _fsync_directory(destination.parent)
-
-
-def _remove_existing_derivative(destination: Path) -> None:
-    """Make a previous derivative inaccessible before a non-low publication."""
-    if not destination.exists() and not destination.is_symlink():
-        return
-    descriptor, stale_name = tempfile.mkstemp(prefix=".stale-", dir=destination.parent)
-    stale = Path(stale_name)
-    os.close(descriptor)
-    try:
-        os.replace(destination, stale)
-        stale.unlink()
-        _fsync_directory(destination.parent)
-    except BaseException:
-        try:
-            stale.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+@dataclass(slots=True)
+class _Prepared:
+    name: str
+    descriptor: int
+    identity: tuple[int, int]
 
 
 def compact_result_json(result: ScanResult) -> bytes:
-    """Serialize only the validated public result contract."""
+    """Serialize only the closed, validated public result contract."""
     return (json.dumps(result.to_public_dict(), separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
 
 
-def write_result(path: Path, result: ScanResult) -> None:
-    """Atomically publish one schema-validated public result file."""
-    contents = compact_result_json(result)
-    if ScanResult.model_validate_json(contents) != result:
-        raise ValueError("result validation failed")
-    temporary = _prepare_private_file(path, contents)
+def quarantine_result() -> ScanResult:
+    return ScanResult(
+        risk_level=RiskLevel.QUARANTINE,
+        evidence=(EvidenceCode.PARSER_FAILURE,),
+        location=("file:structure",),
+        structural_anomalies=(),
+    )
+
+
+def _open_output_directory(directory: Path) -> int:
+    """Open an owned output directory without traversing a symlink."""
     try:
-        _replace_prepared(temporary, path)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        raise ValueError("output unavailable") from None
+    try:
+        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        raise ValueError("output unavailable") from None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError("output unavailable")
+        return descriptor
     except BaseException:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+        os.close(descriptor)
         raise
 
 
-def publish_result(output_dir: Path, result: ScanResult, visible_text: str | None) -> Path | None:
-    """Publish an exact result and, only for low verdicts, marked UTF-8 text."""
-    result_path = output_dir / RESULT_NAME
-    derivative_path = output_dir / DERIVATIVE_NAME
-    if visible_text is None:
-        _remove_existing_derivative(derivative_path)
-        write_result(result_path, result)
+def _fsync_directory(descriptor: int) -> None:
+    os.fsync(descriptor)
+
+
+def _slot_info(directory_fd: int, name: str) -> os.stat_result | None:
+    try:
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
         return None
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+        raise ValueError("output slot unavailable")
+    return info
 
-    derivative_contents = (UNTRUSTED_MARKER + visible_text.rstrip("\n") + "\n").encode("utf-8")
-    result_contents = compact_result_json(result)
-    if ScanResult.model_validate_json(result_contents) != result:
-        raise ValueError("result validation failed")
-    result_temporary = _prepare_private_file(result_path, result_contents)
-    try:
-        derivative_temporary = _prepare_private_file(derivative_path, derivative_contents)
-    except BaseException:
+
+def _prepare(directory_fd: int, contents: bytes) -> _Prepared:
+    """Write, fsync, and validate a private output through its open descriptor."""
+    for _ in range(32):
+        name = f".pending-{secrets.token_hex(16)}"
         try:
-            result_temporary.unlink()
-        except FileNotFoundError:
+            descriptor = os.open(
+                name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory_fd,
+            )
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise OSError("temporary output unavailable")
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.write(descriptor, contents)
+        os.fsync(descriptor)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size != len(contents):
+            raise OSError("output validation failed")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        if os.read(descriptor, len(contents) + 1) != contents:
+            raise OSError("output validation failed")
+        return _Prepared(name, descriptor, (info.st_dev, info.st_ino))
+    except BaseException:
+        os.close(descriptor)
+        try:
+            os.unlink(name, dir_fd=directory_fd)
+        except OSError:
             pass
         raise
+
+
+def _discard(directory_fd: int, prepared: _Prepared | None) -> None:
+    if prepared is None:
+        return
     try:
-        _remove_existing_derivative(derivative_path)
-        _replace_prepared(result_temporary, result_path)
-        _replace_prepared(derivative_temporary, derivative_path)
-        return derivative_path
+        os.close(prepared.descriptor)
+    except OSError:
+        pass
+    try:
+        os.unlink(prepared.name, dir_fd=directory_fd)
+    except OSError:
+        pass
+
+
+def _replace(directory_fd: int, prepared: _Prepared, destination: str) -> None:
+    """Atomically install a previously validated descriptor-backed file."""
+    info = os.fstat(prepared.descriptor)
+    if (info.st_dev, info.st_ino) != prepared.identity or stat.S_IMODE(info.st_mode) != 0o600:
+        raise OSError("output identity changed")
+    _slot_info(directory_fd, destination)
+    os.replace(prepared.name, destination, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    _fsync_directory(directory_fd)
+    os.close(prepared.descriptor)
+
+
+def _remove_slot(directory_fd: int, name: str) -> None:
+    info = _slot_info(directory_fd, name)
+    if info is not None:
+        os.unlink(name, dir_fd=directory_fd)
+        _fsync_directory(directory_fd)
+
+
+def _validate_external_result(result_path: Path, output_directory: Path) -> tuple[int, str] | None:
+    """Accept only a direct child of a non-symlink output directory."""
+    if result_path.parent != output_directory:
+        raise ValueError("result destination unavailable")
+    return None
+
+
+def publish_result(
+    output_dir: Path, result: ScanResult, visible_text: str | None, *, result_path: Path | None = None
+) -> Path | None:
+    """Publish low derivatives first and the schema result as the final commit point."""
+    directory_fd = _open_output_directory(output_dir)
+    derivative: _Prepared | None = None
+    result_file: _Prepared | None = None
+    derivative_released = False
+    try:
+        if result_path is not None:
+            _validate_external_result(result_path, output_dir)
+        _slot_info(directory_fd, RESULT_NAME)
+        _slot_info(directory_fd, DERIVATIVE_NAME)
+        result_bytes = compact_result_json(result)
+        if ScanResult.model_validate_json(result_bytes) != result:
+            raise ValueError("result invalid")
+        result_file = _prepare(directory_fd, result_bytes)
+        if visible_text is not None:
+            derivative = _prepare(
+                directory_fd, (UNTRUSTED_MARKER + visible_text.rstrip("\n") + "\n").encode("utf-8")
+            )
+            _replace(directory_fd, derivative, DERIVATIVE_NAME)
+            derivative_released = True
+            derivative = None
+        else:
+            _remove_slot(directory_fd, DERIVATIVE_NAME)
+        _replace(directory_fd, result_file, RESULT_NAME)
+        result_file = None
+        return output_dir / DERIVATIVE_NAME if derivative_released else None
     except BaseException:
-        for temporary in (result_temporary, derivative_temporary):
+        _discard(directory_fd, derivative)
+        _discard(directory_fd, result_file)
+        if derivative_released:
             try:
-                temporary.unlink()
-            except FileNotFoundError:
+                _remove_slot(directory_fd, DERIVATIVE_NAME)
+            except OSError:
                 pass
         raise
+    finally:
+        os.close(directory_fd)
+
+
+def write_result(path: Path, result: ScanResult) -> None:
+    """Write an explicitly requested result only in its scanner-owned slot."""
+    directory_fd = _open_output_directory(path.parent)
+    prepared: _Prepared | None = None
+    try:
+        _slot_info(directory_fd, path.name)
+        contents = compact_result_json(result)
+        if ScanResult.model_validate_json(contents) != result:
+            raise ValueError("result invalid")
+        prepared = _prepare(directory_fd, contents)
+        _replace(directory_fd, prepared, path.name)
+        prepared = None
+    finally:
+        _discard(directory_fd, prepared)
+        os.close(directory_fd)

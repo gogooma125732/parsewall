@@ -12,7 +12,7 @@ import zipfile
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import BinaryIO, Self
+from typing import BinaryIO, Self, cast
 
 from defusedxml.common import DefusedXmlException  # type: ignore[import-untyped]
 from defusedxml.ElementTree import (  # type: ignore[import-untyped]
@@ -84,6 +84,7 @@ class VerifiedSource:
 
     report: PreflightReport
     _snapshot_path: Path | None
+    _snapshot_descriptor: int | None = None
 
     def __enter__(self) -> Self:
         return self
@@ -92,6 +93,12 @@ class VerifiedSource:
         self.close()
 
     def close(self) -> None:
+        if self._snapshot_descriptor is not None:
+            try:
+                os.close(self._snapshot_descriptor)
+            except OSError:
+                pass
+            self._snapshot_descriptor = None
         if self._snapshot_path is not None:
             try:
                 self._snapshot_path.unlink()
@@ -101,9 +108,41 @@ class VerifiedSource:
 
     def open(self) -> BinaryIO:
         """Open an independent reader for the validated immutable bytes."""
-        if self._snapshot_path is None or self.report.findings:
+        if self._snapshot_descriptor is None or self.report.findings:
             raise ValueError("no usable verified source is available")
-        return self._snapshot_path.open("rb")
+        descriptor, write_end = os.pipe()
+        os.close(write_end)
+        return cast(BinaryIO, _SnapshotReader(self._snapshot_descriptor, descriptor))
+
+
+class _SnapshotReader:
+    """A position-independent, read-only view over a retained snapshot FD."""
+
+    def __init__(self, snapshot_descriptor: int, read_only_descriptor: int) -> None:
+        self._snapshot_descriptor = snapshot_descriptor
+        self._read_only_descriptor = read_only_descriptor
+        self._position = 0
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            size = os.fstat(self._snapshot_descriptor).st_size - self._position
+        data = os.pread(self._snapshot_descriptor, size, self._position)
+        self._position += len(data)
+        return data
+
+    def fileno(self) -> int:
+        return self._read_only_descriptor
+
+    def close(self) -> None:
+        if self._read_only_descriptor >= 0:
+            os.close(self._read_only_descriptor)
+            self._read_only_descriptor = -1
 
 
 def _quarantine_finding(evidence: EvidenceCode) -> Finding:
@@ -417,7 +456,7 @@ def _inspect_zip(
 
 
 _EXTENSIONS = {
-    DocumentFormat.TEXT: frozenset({".txt", ".text", ".md", ".markdown", ".csv", ".htm", ".html"}),
+    DocumentFormat.TEXT: frozenset({".txt", ".md", ".markdown", ".htm", ".html"}),
     DocumentFormat.PDF: frozenset({".pdf"}),
     DocumentFormat.ZIP: frozenset({".zip"}),
     DocumentFormat.DOCX: frozenset({".docx"}),
@@ -552,11 +591,14 @@ def verify_source(path: Path, limits: ScanLimits) -> VerifiedSource:
             )
             if report.findings:
                 return VerifiedSource(report, None)
+            snapshot.flush()
+            os.fsync(snapshot.fileno())
+            os.fchmod(snapshot.fileno(), stat.S_IRUSR)
+            snapshot_descriptor = os.dup(snapshot.fileno())
             snapshot.close()
             snapshot = None
-            os.chmod(snapshot_path, stat.S_IRUSR)
             handed_off = True
-            return VerifiedSource(report, snapshot_path)
+            return VerifiedSource(report, snapshot_path, snapshot_descriptor)
         except (MemoryError, OSError, RuntimeError, ValueError) as error:
             return VerifiedSource(_failure_report(error, size=opened.st_size), None)
         finally:
