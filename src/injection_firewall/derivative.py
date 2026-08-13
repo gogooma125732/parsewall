@@ -40,8 +40,15 @@ def quarantine_result() -> ScanResult:
 
 def _open_output_directory(directory: Path) -> int:
     """Open an owned output directory without traversing a symlink."""
+    if ".." in directory.parts:
+        raise ValueError("output unavailable")
     try:
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        cursor = Path(directory.anchor) if directory.is_absolute() else Path(".")
+        for part in directory.parts[1 if directory.is_absolute() else 0 :]:
+            cursor /= part
+            if cursor.is_symlink():
+                raise ValueError("output unavailable")
+            cursor.mkdir(mode=0o700, exist_ok=True)
     except OSError:
         raise ValueError("output unavailable") from None
     try:
@@ -169,6 +176,8 @@ def publish_result(
             _validate_external_result(result_path, output_dir)
         _slot_info(directory_fd, RESULT_NAME)
         _slot_info(directory_fd, DERIVATIVE_NAME)
+        # A prior result is never authoritative during a new transaction.
+        _remove_slot(directory_fd, RESULT_NAME)
         result_bytes = compact_result_json(result)
         if ScanResult.model_validate_json(result_bytes) != result:
             raise ValueError("result invalid")
@@ -202,6 +211,8 @@ def write_result(path: Path, result: ScanResult) -> None:
     """Write an explicitly requested result only in its scanner-owned slot."""
     directory_fd = _open_output_directory(path.parent)
     prepared: _Prepared | None = None
+    installed = False
+    succeeded = False
     try:
         _slot_info(directory_fd, path.name)
         contents = compact_result_json(result)
@@ -209,7 +220,20 @@ def write_result(path: Path, result: ScanResult) -> None:
             raise ValueError("result invalid")
         prepared = _prepare(directory_fd, contents)
         _replace(directory_fd, prepared, path.name)
+        installed = True
         prepared = None
+        succeeded = True
+    except BaseException:
+        try:
+            _remove_slot(directory_fd, path.name)
+        except OSError:
+            pass
+        raise
     finally:
+        if installed and not succeeded:
+            try:
+                _remove_slot(directory_fd, path.name)
+            except OSError:
+                pass
         _discard(directory_fd, prepared)
         os.close(directory_fd)

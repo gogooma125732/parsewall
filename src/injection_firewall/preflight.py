@@ -604,7 +604,11 @@ def verify_source(path: Path, limits: ScanLimits) -> VerifiedSource:
                 return VerifiedSource(_failed_report(EvidenceCode.CORRUPT_DOCUMENT, size=opened.st_size), None)
             snapshot.close()
             snapshot = None
-            snapshot_path.unlink()
+            try:
+                snapshot_path.unlink()
+            except OSError:
+                os.close(snapshot_descriptor)
+                return VerifiedSource(_failure_report(OSError(), size=opened.st_size), None)
             handed_off = True
             return VerifiedSource(report, None, snapshot_descriptor)
         except (MemoryError, OSError, RuntimeError, ValueError) as error:
