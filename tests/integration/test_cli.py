@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,12 @@ import pytest
 from injection_firewall import cli
 
 SOURCE_ROOT = Path(__file__).parents[2] / "src"
+
+
+def assert_directory_revoked(path: Path) -> None:
+    assert path.exists()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o000
+    path.chmod(0o700)
 
 
 def run_cli(arguments: list[str]) -> subprocess.CompletedProcess[str]:
@@ -281,7 +288,7 @@ def test_cli_requested_parent_renamed_after_open_cannot_spoof_success(
     assert stderr.contents == "scan output failed\n"
     assert (pivot / "scan.json").read_bytes() == b'{"attacker":true}\n'
     assert not (moved / "scan.json").exists()
-    assert not (tmp_path / "out").exists()
+    assert_directory_revoked(tmp_path / "out")
 
 
 def test_cli_requested_parent_detached_after_commit_still_revokes_genuine_result(
@@ -325,7 +332,7 @@ def test_cli_requested_parent_detached_after_commit_still_revokes_genuine_result
     assert stderr.contents == "scan output failed\n"
     assert requested.read_bytes() == b'{"attacker":true}\n'
     assert not (moved / "scan.json").exists()
-    assert not (tmp_path / "out").exists()
+    assert_directory_revoked(tmp_path / "out")
 
 
 def test_cli_output_parent_detached_after_scan_still_revokes_genuine_low(
@@ -370,7 +377,7 @@ def test_cli_output_parent_detached_after_scan_still_revokes_genuine_low(
     assert stdout.buffer.contents == b""
     assert stderr.contents == "scan output failed\n"
     assert (output_dir / "visible.txt").read_bytes() == b"ATTACKER"
-    assert not (moved / "out").exists()
+    assert_directory_revoked(moved / "out")
 
 
 def test_cli_failure_before_requested_install_revokes_internal_low_release(
@@ -406,4 +413,4 @@ def test_cli_failure_before_requested_install_revokes_internal_low_release(
     assert stdout.buffer.contents == b""
     assert stderr.contents == "scan output failed\n"
     assert not result_path.exists()
-    assert not output_dir.exists()
+    assert_directory_revoked(output_dir)

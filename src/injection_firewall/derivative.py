@@ -24,6 +24,7 @@ class _Prepared:
     descriptor: int
     identity: tuple[int, int]
     source_directory_fd: int
+    installed_name: str | None = None
 
 
 @dataclass(slots=True)
@@ -78,6 +79,16 @@ def _identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
+def _close_descriptor(descriptor: int | None) -> None:
+    """Best-effort close for an already-owned descriptor during cleanup."""
+    if descriptor is None:
+        return
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
+
+
 def _validate_leaf(path: Path) -> str:
     if ".." in path.parts:
         raise ValueError("output unavailable")
@@ -100,14 +111,15 @@ def _open_directory(path: Path, *, create: bool) -> int:
     if ".." in path.parts:
         raise ValueError("output unavailable")
     absolute = path.is_absolute()
-    descriptor = os.open(path.anchor if absolute else ".", _DIRECTORY_FLAGS)
     parts = path.parts[1:] if absolute else path.parts
+    descriptor = os.open(path.anchor if absolute else ".", _DIRECTORY_FLAGS)
     try:
         if not _trusted_parent(os.fstat(descriptor)):
             raise ValueError("output unavailable")
         for part in parts:
             if part in {"", "."}:
                 continue
+            created = False
             try:
                 child = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
             except FileNotFoundError:
@@ -118,20 +130,28 @@ def _open_directory(path: Path, *, create: bool) -> int:
                 except FileExistsError:
                     pass
                 child = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
-                child_info = os.fstat(child)
-                if child_info.st_uid != os.geteuid():
-                    os.close(child)
+                created = True
+            try:
+                if created:
+                    child_info = os.fstat(child)
+                    if child_info.st_uid != os.geteuid():
+                        raise ValueError("output unavailable")
+                    os.fchmod(child, 0o700)
+                info = os.fstat(child)
+                if not _trusted_parent(info):
                     raise ValueError("output unavailable")
-                os.fchmod(child, 0o700)
-            info = os.fstat(child)
-            if not _trusted_parent(info):
-                os.close(child)
-                raise ValueError("output unavailable")
-            os.close(descriptor)
+            except BaseException:
+                _close_descriptor(child)
+                raise
+            try:
+                os.close(descriptor)
+            except BaseException:
+                _close_descriptor(child)
+                raise
             descriptor = child
         return descriptor
     except BaseException:
-        os.close(descriptor)
+        _close_descriptor(descriptor)
         raise
 
 
@@ -176,8 +196,10 @@ def _create_transaction(parent_fd: int) -> _Transaction:
             os.mkdir(name, 0o700, dir_fd=parent_fd)
         except FileExistsError:
             continue
+        descriptor: int | None = None
         try:
             descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+            os.fchmod(descriptor, 0o700)
             info = os.fstat(descriptor)
             if (
                 not stat.S_ISDIR(info.st_mode)
@@ -190,28 +212,36 @@ def _create_transaction(parent_fd: int) -> _Transaction:
             try:
                 os.rmdir(name, dir_fd=parent_fd)
             except OSError:
-                pass
+                if descriptor is not None:
+                    try:
+                        os.fchmod(descriptor, 0o000)
+                    except OSError:
+                        pass
+            _close_descriptor(descriptor)
             raise
     raise OSError("transaction unavailable")
 
 
 def _prepare(directory_fd: int, contents: bytes) -> _Prepared:
     """Write, fsync, and validate an object inside a retained private directory."""
-    for _ in range(32):
-        name = _new_private_name("pending")
-        try:
-            descriptor = os.open(
-                name,
-                os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=directory_fd,
-            )
-            break
-        except FileExistsError:
-            continue
-    else:
-        raise OSError("temporary output unavailable")
+    descriptor: int | None = None
+    name: str | None = None
     try:
+        for _ in range(32):
+            candidate = _new_private_name("pending")
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                name = candidate
+                break
+            except FileExistsError:
+                continue
+        if descriptor is None or name is None:
+            raise OSError("temporary output unavailable")
         os.fchmod(descriptor, 0o600)
         written = 0
         while written < len(contents):
@@ -233,21 +263,19 @@ def _prepare(directory_fd: int, contents: bytes) -> _Prepared:
             raise OSError("output validation failed")
         return _Prepared(name, descriptor, _identity(info), directory_fd)
     except BaseException:
-        os.close(descriptor)
-        try:
-            os.unlink(name, dir_fd=directory_fd)
-        except OSError:
-            pass
+        _close_descriptor(descriptor)
+        if name is not None:
+            try:
+                os.unlink(name, dir_fd=directory_fd)
+            except OSError:
+                pass
         raise
 
 
 def _discard(directory_fd: int, prepared: _Prepared | None) -> None:
     if prepared is None:
         return
-    try:
-        os.close(prepared.descriptor)
-    except OSError:
-        pass
+    _close_descriptor(prepared.descriptor)
     if prepared.name is not None:
         try:
             os.unlink(prepared.name, dir_fd=directory_fd)
@@ -255,8 +283,8 @@ def _discard(directory_fd: int, prepared: _Prepared | None) -> None:
             pass
 
 
-def _replace(directory_fd: int, prepared: _Prepared, destination: str) -> None:
-    """Move one validated private object into a directory owned by this transaction."""
+def _install_exclusive(directory_fd: int, prepared: _Prepared, destination: str) -> None:
+    """Link a validated private object into an absent public slot without clobbering."""
     if prepared.name is None:
         raise OSError("output already installed")
     info = os.fstat(prepared.descriptor)
@@ -267,65 +295,81 @@ def _replace(directory_fd: int, prepared: _Prepared, destination: str) -> None:
         or stat.S_IMODE(info.st_mode) != 0o600
     ):
         raise OSError("output identity changed")
-    os.replace(
-        prepared.name,
-        destination,
-        src_dir_fd=prepared.source_directory_fd,
-        dst_dir_fd=directory_fd,
-    )
+    try:
+        os.link(
+            prepared.name,
+            destination,
+            src_dir_fd=prepared.source_directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except BaseException:
+        try:
+            uncertain = os.stat(destination, dir_fd=directory_fd, follow_symlinks=False)
+            if _identity(uncertain) == prepared.identity and stat.S_ISREG(uncertain.st_mode):
+                prepared.installed_name = destination
+        except OSError:
+            pass
+        raise
+    prepared.installed_name = destination
+    linked = os.stat(destination, dir_fd=directory_fd, follow_symlinks=False)
+    if (
+        _identity(linked) != prepared.identity
+        or not stat.S_ISREG(linked.st_mode)
+        or linked.st_nlink != 2
+        or stat.S_IMODE(linked.st_mode) != 0o600
+    ):
+        raise OSError("linked output identity changed")
+    os.unlink(prepared.name, dir_fd=prepared.source_directory_fd)
+    prepared.name = None
     installed = os.stat(destination, dir_fd=directory_fd, follow_symlinks=False)
+    descriptor_info = os.fstat(prepared.descriptor)
     if (
         _identity(installed) != prepared.identity
+        or _identity(descriptor_info) != prepared.identity
         or not stat.S_ISREG(installed.st_mode)
         or installed.st_nlink != 1
+        or descriptor_info.st_nlink != 1
         or stat.S_IMODE(installed.st_mode) != 0o600
     ):
         raise OSError("installed output identity changed")
-    prepared.name = None
 
 
-def _close_prepared(prepared: _Prepared | None) -> None:
-    if prepared is None:
+def _revoke_prepared_install(directory_fd: int, prepared: _Prepared | None) -> None:
+    """Remove only a public name installed by this invocation, or revoke its inode."""
+    if prepared is None or prepared.installed_name is None:
         return
+    removed = False
     try:
-        os.close(prepared.descriptor)
+        current = os.stat(prepared.installed_name, dir_fd=directory_fd, follow_symlinks=False)
+        if _identity(current) == prepared.identity and stat.S_ISREG(current.st_mode):
+            os.unlink(prepared.installed_name, dir_fd=directory_fd)
+            removed = True
+            prepared.installed_name = None
     except OSError:
         pass
+    if not removed:
+        try:
+            os.fchmod(prepared.descriptor, 0o000)
+        except OSError:
+            pass
 
 
 def _open_owned_directory(parent_fd: int, name: str, identity: tuple[int, int]) -> int:
     descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
-    info = os.fstat(descriptor)
-    if (
-        _identity(info) != identity
-        or not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.geteuid()
-        or stat.S_IMODE(info.st_mode) != 0o700
-    ):
-        os.close(descriptor)
-        raise OSError("owned directory changed")
-    return descriptor
-
-
-def _hide_owned_directory(parent_fd: int, name: str, identity: tuple[int, int]) -> str | None:
-    """Remove an invocation-owned directory from its public name without unlinking it."""
     try:
-        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if _identity(current) != identity or not stat.S_ISDIR(current.st_mode):
-            return None
-        for _ in range(32):
-            hidden = _new_private_name("revoked")
-            try:
-                os.stat(hidden, dir_fd=parent_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                os.rename(name, hidden, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-                moved = os.stat(hidden, dir_fd=parent_fd, follow_symlinks=False)
-                if _identity(moved) != identity:
-                    raise OSError("revoked identity changed")
-                return hidden
-        return None
-    except OSError:
-        return None
+        info = os.fstat(descriptor)
+        if (
+            _identity(info) != identity
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise OSError("owned directory changed")
+    except BaseException:
+        _close_descriptor(descriptor)
+        raise
+    return descriptor
 
 
 def _cleanup_directory(parent_fd: int, name: str, identity: tuple[int, int]) -> None:
@@ -356,10 +400,7 @@ def _cleanup_directory(parent_fd: int, name: str, identity: tuple[int, int]) -> 
 
 
 def _cleanup_transaction(transaction: _Transaction) -> None:
-    try:
-        os.close(transaction.descriptor)
-    except OSError:
-        pass
+    _close_descriptor(transaction.descriptor)
     _cleanup_directory(transaction.parent_fd, transaction.name, transaction.identity)
 
 
@@ -368,22 +409,27 @@ def _claim_output_directory(parent_fd: int, name: str) -> tuple[int, tuple[int, 
     os.mkdir(name, 0o700, dir_fd=parent_fd)
     created = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     created_identity = _identity(created)
+    descriptor: int | None = None
+    opened_identity: tuple[int, int] | None = None
     try:
         descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
         info = os.fstat(descriptor)
+        opened_identity = _identity(info)
         if (
-            _identity(info) != created_identity
+            opened_identity != created_identity
             or not stat.S_ISDIR(info.st_mode)
             or info.st_uid != os.geteuid()
             or stat.S_IMODE(info.st_mode) != 0o700
         ):
-            os.close(descriptor)
             raise OSError("output directory unavailable")
         return descriptor, created_identity
     except BaseException:
-        hidden = _hide_owned_directory(parent_fd, name, created_identity)
-        if hidden is not None:
-            _cleanup_directory(parent_fd, hidden, created_identity)
+        if descriptor is not None and opened_identity == created_identity:
+            try:
+                os.fchmod(descriptor, 0o000)
+            except OSError:
+                pass
+        _close_descriptor(descriptor)
         raise
 
 
@@ -465,13 +511,9 @@ def _publish_result(output_dir: Path, result: ScanResult, visible_text: str | No
         output_fd, output_identity = _claim_output_directory(parent_fd, output_name)
         _fsync_directory(parent_fd)
         if derivative is not None:
-            _replace(output_fd, derivative, DERIVATIVE_NAME)
-            _close_prepared(derivative)
-            derivative = None
+            _install_exclusive(output_fd, derivative, DERIVATIVE_NAME)
             _fsync_directory(output_fd)
-        _replace(output_fd, result_file, RESULT_NAME)
-        _close_prepared(result_file)
-        result_file = None
+        _install_exclusive(output_fd, result_file, RESULT_NAME)
         _fsync_directory(output_fd)
         installed_result = os.stat(RESULT_NAME, dir_fd=output_fd, follow_symlinks=False)
         if not stat.S_ISREG(installed_result.st_mode) or stat.S_IMODE(installed_result.st_mode) != 0o600:
@@ -483,24 +525,18 @@ def _publish_result(output_dir: Path, result: ScanResult, visible_text: str | No
         capability_transferred = True
         return Publication(output_dir, output_identity, derivative_path, parent_fd, output_name)
     finally:
+        if output_fd is not None and output_identity is not None and not committed:
+            _revoke_prepared_install(output_fd, derivative)
+            _revoke_prepared_install(output_fd, result_file)
+            try:
+                os.fchmod(output_fd, 0o000)
+            except OSError:
+                pass
         if transaction is not None:
             _discard(transaction.descriptor, derivative)
             _discard(transaction.descriptor, result_file)
-        hidden: str | None = None
-        if output_fd is not None and output_identity is not None and not committed:
-            hidden = _hide_owned_directory(parent_fd, output_name, output_identity)
-            if hidden is None:
-                try:
-                    os.fchmod(output_fd, 0o000)
-                except OSError:
-                    pass
         if output_fd is not None:
-            try:
-                os.close(output_fd)
-            except OSError:
-                pass
-        if hidden is not None and output_identity is not None:
-            _cleanup_directory(parent_fd, hidden, output_identity)
+            _close_descriptor(output_fd)
         if transaction is not None:
             _cleanup_transaction(transaction)
         if not capability_transferred:
@@ -620,16 +656,10 @@ def revoke_publication(publication: Publication | None) -> None:
     owned_fd: int | None = None
     try:
         owned_fd = _open_owned_directory(parent_fd, name, publication.identity)
-        hidden = _hide_owned_directory(parent_fd, name, publication.identity)
-        if hidden is None:
-            try:
-                os.fchmod(owned_fd, 0o000)
-            except OSError:
-                pass
-        else:
-            os.close(owned_fd)
-            owned_fd = None
-            _cleanup_directory(parent_fd, hidden, publication.identity)
+        try:
+            os.fchmod(owned_fd, 0o000)
+        except OSError:
+            pass
     except OSError:
         return
     finally:

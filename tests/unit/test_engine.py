@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import injection_firewall.derivative as derivative_module
 from injection_firewall.contract import EvidenceCode, RiskLevel
 from injection_firewall.derivative import (
     _trusted_parent,
@@ -22,6 +23,16 @@ def write_utf8(directory: Path, name: str, contents: str) -> Path:
     source = directory / name
     source.write_text(contents, encoding="utf-8")
     return source
+
+
+def open_fd_count() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+def assert_directory_revoked(path: Path) -> None:
+    assert path.exists()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o000
+    path.chmod(0o700)
 
 
 def test_low_scan_writes_marker_prefixed_derivative_and_private_atomic_outputs(tmp_path: Path):
@@ -127,11 +138,11 @@ def test_symlinked_output_directory_is_rejected_without_writing_target(tmp_path:
     assert not list(target.iterdir())
 
 
-def test_rename_failure_rolls_back_derivative_and_replaces_result_with_quarantine(
+def test_install_failure_rolls_back_derivative_and_replaces_result_with_quarantine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     source = write_utf8(tmp_path, "safe.txt", "ordinary report")
-    from injection_firewall.derivative import _replace as real_replace
+    from injection_firewall.derivative import _install_exclusive as real_install
 
     calls = 0
 
@@ -140,9 +151,9 @@ def test_rename_failure_rolls_back_derivative_and_replaces_result_with_quarantin
         calls += 1
         if calls == 2:
             raise OSError("rename interrupted")
-        return real_replace(directory_fd, prepared, destination)
+        return real_install(directory_fd, prepared, destination)
 
-    monkeypatch.setattr("injection_firewall.derivative._replace", fail_final_result)
+    monkeypatch.setattr("injection_firewall.derivative._install_exclusive", fail_final_result)
 
     artifacts = scan_file(source, tmp_path / "out", ScanLimits())
 
@@ -287,7 +298,7 @@ def test_occupied_prior_low_is_rejected_before_scanning_and_left_untouched(
     assert (output_dir / "visible.txt").read_bytes() == prior_visible
 
 
-@pytest.mark.parametrize("operation", ["replace", "fsync"])
+@pytest.mark.parametrize("operation", ["link", "fsync"])
 def test_persistent_publication_fault_before_commit_leaves_no_public_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ):
@@ -297,8 +308,8 @@ def test_persistent_publication_fault_before_commit_leaves_no_public_directory(
     def fail(*args, **kwargs):
         raise OSError(f"persistent {operation} failure")
 
-    if operation == "replace":
-        monkeypatch.setattr("injection_firewall.derivative.os.replace", fail)
+    if operation == "link":
+        monkeypatch.setattr("injection_firewall.derivative.os.link", fail)
     else:
         monkeypatch.setattr("injection_firewall.derivative.os.fsync", fail)
 
@@ -306,7 +317,10 @@ def test_persistent_publication_fault_before_commit_leaves_no_public_directory(
 
     assert artifacts.result.risk_level is RiskLevel.QUARANTINE
     assert artifacts.derivative_path is None
-    assert not output_dir.exists()
+    if operation == "link":
+        assert_directory_revoked(output_dir)
+    else:
+        assert not output_dir.exists()
 
 
 def test_persistent_unlink_during_failed_commit_cannot_restore_public_authority(
@@ -323,13 +337,13 @@ def test_persistent_unlink_during_failed_commit_cannot_restore_public_authority(
             raise OSError("persistent unlink failure")
         return real_unlink(path, *args, dir_fd=dir_fd, **kwargs)
 
-    monkeypatch.setattr("injection_firewall.derivative._replace", fail_commit)
+    monkeypatch.setattr("injection_firewall.derivative._install_exclusive", fail_commit)
     monkeypatch.setattr("injection_firewall.derivative.os.unlink", fail_private_cleanup)
 
     with pytest.raises(OSError):
         publish_result(output_dir, PolicyDecision((), frozenset(), frozenset()).result(), "ordinary")
 
-    assert not output_dir.exists()
+    assert_directory_revoked(output_dir)
     for leftover in tmp_path.glob(".txn-*"):
         assert stat.S_IMODE(leftover.stat().st_mode) == 0o700
 
@@ -361,7 +375,7 @@ def test_post_result_fsync_and_persistent_unlink_failure_leave_no_low_authority(
     with pytest.raises(OSError):
         publish_result(output_dir, PolicyDecision((), frozenset(), frozenset()).result(), "ordinary")
 
-    assert not output_dir.exists()
+    assert_directory_revoked(output_dir)
 
 
 def test_internal_rollback_rename_failure_revokes_directory_access(
@@ -451,16 +465,16 @@ def test_private_cleanup_list_failure_cannot_reverse_requested_commit(
 
 
 @pytest.mark.parametrize("replacement", ["regular", "hardlink", "symlink"])
-def test_swap_immediately_inside_final_prepared_rename_cannot_install_attacker_object(
+def test_swap_immediately_inside_final_prepared_link_cannot_install_attacker_object(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str
 ):
     output_dir = tmp_path / "out"
     victim = tmp_path / "victim"
     victim.write_bytes(b"victim bytes")
-    real_replace = os.replace
+    real_link = os.link
     attacked = False
 
-    def swap_then_replace(src, dst, *args, src_dir_fd=None, dst_dir_fd=None, **kwargs):
+    def swap_then_link(src, dst, *args, src_dir_fd=None, dst_dir_fd=None, **kwargs):
         nonlocal attacked
         if isinstance(src, str) and src.startswith(".pending-"):
             attacked = True
@@ -470,10 +484,10 @@ def test_swap_immediately_inside_final_prepared_rename_cannot_install_attacker_o
                 os.write(descriptor, b"attacker regular")
                 os.close(descriptor)
             elif replacement == "hardlink":
-                os.link(victim, src, dst_dir_fd=src_dir_fd)
+                real_link(victim, src, dst_dir_fd=src_dir_fd)
             else:
                 os.symlink(victim, src, dir_fd=src_dir_fd)
-        return real_replace(
+        return real_link(
             src,
             dst,
             *args,
@@ -482,14 +496,22 @@ def test_swap_immediately_inside_final_prepared_rename_cannot_install_attacker_o
             **kwargs,
         )
 
-    monkeypatch.setattr("injection_firewall.derivative.os.replace", swap_then_replace)
+    monkeypatch.setattr("injection_firewall.derivative.os.link", swap_then_link)
 
     with pytest.raises(OSError):
         publish_result(output_dir, PolicyDecision((), frozenset(), frozenset()).result(), "ordinary")
 
     assert attacked
+    assert stat.S_IMODE(output_dir.stat().st_mode) == 0o000
+    output_dir.chmod(0o700)
     assert not (output_dir / "result.json").exists()
-    assert not (output_dir / "visible.txt").exists()
+    attacker_slot = output_dir / "visible.txt"
+    if replacement == "regular":
+        assert attacker_slot.read_bytes() == b"attacker regular"
+    elif replacement == "hardlink":
+        assert attacker_slot.stat().st_ino == victim.stat().st_ino
+    else:
+        assert attacker_slot.is_symlink()
 
 
 def test_output_parent_swapped_to_symlink_after_path_check_is_never_followed(
@@ -554,7 +576,7 @@ def test_output_parent_renamed_after_capability_open_cannot_spoof_returned_path(
     assert artifacts.result.risk_level is RiskLevel.QUARANTINE
     assert artifacts.derivative_path is None
     assert (pivot / "job" / "visible.txt").read_bytes() == b"ATTACKER"
-    assert not (moved / "job").exists()
+    assert_directory_revoked(moved / "job")
 
 
 def test_group_writable_non_sticky_output_ancestor_is_rejected(tmp_path: Path):
@@ -677,3 +699,349 @@ def test_requested_post_rename_fsync_failure_is_revoked_without_unlinking_destin
         write_result(destination, PolicyDecision((), frozenset(), frozenset()).result())
 
     assert not destination.exists()
+
+
+@pytest.mark.parametrize("slot_name", ["visible.txt", "result.json"])
+@pytest.mark.parametrize("occupant_kind", ["regular", "source-hardlink", "symlink"])
+def test_internal_install_is_atomic_no_clobber_at_the_final_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slot_name: str,
+    occupant_kind: str,
+):
+    source = write_utf8(tmp_path, "safe.txt", "ordinary report")
+    output_dir = tmp_path / "out"
+    occupant_bytes = b"concurrent unowned occupant"
+    victim = tmp_path / "victim"
+    victim.write_bytes(occupant_bytes)
+    real_link = os.link
+    inserted = False
+
+    def occupy(dst, dst_dir_fd):
+        nonlocal inserted
+        if dst == slot_name and not inserted:
+            inserted = True
+            if occupant_kind == "regular":
+                descriptor = os.open(
+                    dst,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=dst_dir_fd,
+                )
+                os.write(descriptor, occupant_bytes)
+                os.close(descriptor)
+            elif occupant_kind == "source-hardlink":
+                real_link(source, dst, dst_dir_fd=dst_dir_fd)
+            else:
+                os.symlink(victim, dst, dir_fd=dst_dir_fd)
+
+    def occupy_then_link(src, dst, *args, src_dir_fd=None, dst_dir_fd=None, **kwargs):
+        occupy(dst, dst_dir_fd)
+        return real_link(
+            src,
+            dst,
+            *args,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            **kwargs,
+        )
+
+    monkeypatch.setattr("injection_firewall.derivative.os.link", occupy_then_link)
+
+    artifacts = scan_file(source, output_dir, ScanLimits())
+
+    assert inserted
+    assert artifacts.result.risk_level is RiskLevel.QUARANTINE
+    assert artifacts.derivative_path is None
+    if output_dir.exists():
+        output_dir.chmod(0o700)
+    occupant = output_dir / slot_name
+    if occupant_kind == "regular":
+        assert occupant.read_bytes() == occupant_bytes
+    elif occupant_kind == "source-hardlink":
+        assert occupant.stat().st_ino == source.stat().st_ino
+        assert source.read_text("utf-8") == "ordinary report"
+    else:
+        assert occupant.is_symlink()
+        assert occupant.read_bytes() == occupant_bytes
+    other_slot = "result.json" if slot_name == "visible.txt" else "visible.txt"
+    assert not (output_dir / other_slot).exists()
+
+
+def test_create_transaction_fstat_failures_do_not_leak_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    before = open_fd_count()
+
+    def fail_fstat(_descriptor: int):
+        raise RuntimeError("transaction fstat sentinel")
+
+    monkeypatch.setattr("injection_firewall.derivative.os.fstat", fail_fstat)
+    try:
+        for _ in range(25):
+            with pytest.raises(RuntimeError, match="transaction fstat sentinel"):
+                derivative_module._create_transaction(parent_fd)
+        assert open_fd_count() == before
+    finally:
+        os.close(parent_fd)
+
+
+def test_open_directory_child_fstat_failures_do_not_leak_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / "child").mkdir()
+    monkeypatch.chdir(tmp_path)
+    real_fstat = os.fstat
+    calls = 0
+
+    def fail_child_fstat(descriptor: int):
+        nonlocal calls
+        calls += 1
+        if calls % 2 == 0:
+            raise RuntimeError("child fstat sentinel")
+        return real_fstat(descriptor)
+
+    monkeypatch.setattr("injection_firewall.derivative.os.fstat", fail_child_fstat)
+    before = open_fd_count()
+    for _ in range(25):
+        with pytest.raises(RuntimeError, match="child fstat sentinel"):
+            derivative_module._open_directory(Path("child"), create=False)
+    assert open_fd_count() == before
+
+
+def test_claim_output_fstat_failures_do_not_leak_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    before = open_fd_count()
+
+    def fail_fstat(_descriptor: int):
+        raise RuntimeError("claim fstat sentinel")
+
+    monkeypatch.setattr("injection_firewall.derivative.os.fstat", fail_fstat)
+    try:
+        for index in range(25):
+            with pytest.raises(RuntimeError, match="claim fstat sentinel"):
+                derivative_module._claim_output_directory(parent_fd, f"out-{index}")
+        assert open_fd_count() == before
+        residues = list(tmp_path.iterdir())
+        assert residues
+        for residue in residues:
+            assert stat.S_IMODE(residue.stat().st_mode) in {0o000, 0o700}
+            if stat.S_IMODE(residue.stat().st_mode) == 0o000:
+                residue.chmod(0o700)
+            residue.rmdir()
+    finally:
+        os.close(parent_fd)
+
+
+def test_owned_directory_fstat_failures_do_not_leak_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    owned = tmp_path / "owned"
+    owned.mkdir(mode=0o700)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    identity = (owned.stat().st_dev, owned.stat().st_ino)
+    before = open_fd_count()
+
+    def fail_fstat(_descriptor: int):
+        raise RuntimeError("owned fstat sentinel")
+
+    monkeypatch.setattr("injection_firewall.derivative.os.fstat", fail_fstat)
+    try:
+        for _ in range(25):
+            with pytest.raises(RuntimeError, match="owned fstat sentinel"):
+                derivative_module._open_owned_directory(parent_fd, owned.name, identity)
+        assert open_fd_count() == before
+    finally:
+        os.close(parent_fd)
+
+
+def test_child_fstat_error_is_not_hidden_by_cleanup_close_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / "child").mkdir()
+    monkeypatch.chdir(tmp_path)
+    real_fstat = os.fstat
+    real_close = os.close
+    calls = 0
+
+    def fail_child_fstat(descriptor: int):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("source fstat sentinel")
+        return real_fstat(descriptor)
+
+    def close_then_fail(descriptor: int):
+        real_close(descriptor)
+        raise OSError("cleanup close sentinel")
+
+    monkeypatch.setattr("injection_firewall.derivative.os.fstat", fail_child_fstat)
+    monkeypatch.setattr("injection_firewall.derivative.os.close", close_then_fail)
+
+    with pytest.raises(RuntimeError, match="source fstat sentinel"):
+        derivative_module._open_directory(Path("child"), create=False)
+
+
+def test_open_directory_child_open_failures_do_not_leak_or_hide_the_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / "child").mkdir()
+    monkeypatch.chdir(tmp_path)
+    real_open = os.open
+
+    def fail_child_open(path, flags, *args, dir_fd=None, **kwargs):
+        if path == "child":
+            raise OSError("child open sentinel")
+        return real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+
+    monkeypatch.setattr("injection_firewall.derivative.os.open", fail_child_open)
+    before = open_fd_count()
+    for _ in range(25):
+        with pytest.raises(OSError, match="child open sentinel"):
+            derivative_module._open_directory(Path("child"), create=False)
+    assert open_fd_count() == before
+
+
+def test_create_transaction_fchmod_failures_do_not_leak_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    before = open_fd_count()
+
+    def fail_fchmod(_descriptor: int, _mode: int):
+        raise OSError("transaction fchmod sentinel")
+
+    monkeypatch.setattr("injection_firewall.derivative.os.fchmod", fail_fchmod)
+    try:
+        for _ in range(25):
+            with pytest.raises(OSError, match="transaction fchmod sentinel"):
+                derivative_module._create_transaction(parent_fd)
+        assert open_fd_count() == before
+        assert not list(tmp_path.glob(".txn-*"))
+    finally:
+        os.close(parent_fd)
+
+
+def test_prepare_fstat_failures_do_not_leak_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    directory_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    before = open_fd_count()
+
+    def fail_fstat(_descriptor: int):
+        raise RuntimeError("prepare fstat sentinel")
+
+    monkeypatch.setattr("injection_firewall.derivative.os.fstat", fail_fstat)
+    try:
+        for _ in range(25):
+            with pytest.raises(RuntimeError, match="prepare fstat sentinel"):
+                derivative_module._prepare(directory_fd, b"result")
+        assert open_fd_count() == before
+        assert not list(tmp_path.iterdir())
+    finally:
+        os.close(directory_fd)
+
+
+def test_identity_reopen_fstat_failures_do_not_leak_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = tmp_path / "target"
+    target.write_bytes(b"result")
+    target.chmod(0o600)
+    identity = (target.stat().st_dev, target.stat().st_ino)
+    real_fstat = os.fstat
+
+    def fail_target_fstat(descriptor: int):
+        info = real_fstat(descriptor)
+        if (info.st_dev, info.st_ino) == identity:
+            raise OSError("identity fstat sentinel")
+        return info
+
+    monkeypatch.setattr("injection_firewall.derivative.os.fstat", fail_target_fstat)
+    before = open_fd_count()
+    for _ in range(25):
+        assert not derivative_module._file_path_matches(target, identity)
+    assert open_fd_count() == before
+
+
+@pytest.mark.parametrize("occupant_kind", ["regular", "source-hardlink", "symlink"])
+def test_rollback_never_hides_or_cleans_an_occupant_inserted_at_revocation_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, occupant_kind: str
+):
+    source = write_utf8(tmp_path, "safe.txt", "ordinary report")
+    output_dir = tmp_path / "out"
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"concurrent occupant")
+    real_fchmod = os.fchmod
+    inserted = False
+
+    def fail_install(*_args, **_kwargs):
+        raise OSError("install sentinel")
+
+    def occupy_then_revoke(directory_fd, mode):
+        nonlocal inserted
+        info = os.fstat(directory_fd)
+        if mode == 0o000 and stat.S_ISDIR(info.st_mode) and not inserted:
+            if occupant_kind == "regular":
+                descriptor = os.open(
+                    "visible.txt",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                os.write(descriptor, b"concurrent occupant")
+                os.close(descriptor)
+            elif occupant_kind == "source-hardlink":
+                os.link(source, "visible.txt", dst_dir_fd=directory_fd)
+            else:
+                os.symlink(victim, "visible.txt", dir_fd=directory_fd)
+            inserted = True
+        return real_fchmod(directory_fd, mode)
+
+    monkeypatch.setattr("injection_firewall.derivative._install_exclusive", fail_install)
+    monkeypatch.setattr("injection_firewall.derivative.os.fchmod", occupy_then_revoke)
+
+    with pytest.raises(OSError, match="install sentinel"):
+        publish_result(output_dir, PolicyDecision((), frozenset(), frozenset()).result(), "ordinary")
+
+    assert inserted
+    assert output_dir.exists()
+    assert stat.S_IMODE(output_dir.stat().st_mode) == 0o000
+    output_dir.chmod(0o700)
+    occupant = output_dir / "visible.txt"
+    if occupant_kind == "regular":
+        assert occupant.read_bytes() == b"concurrent occupant"
+    elif occupant_kind == "source-hardlink":
+        assert occupant.stat().st_ino == source.stat().st_ino
+    else:
+        assert occupant.is_symlink()
+
+
+def test_claim_identity_mismatch_never_chmods_the_concurrent_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    real_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, *args, dir_fd=None, **kwargs):
+        nonlocal swapped
+        if path == "out" and dir_fd == parent_fd and not swapped:
+            swapped = True
+            os.rename("out", "moved", src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            os.mkdir("out", 0o700, dir_fd=parent_fd)
+        return real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+
+    monkeypatch.setattr("injection_firewall.derivative.os.open", swap_before_open)
+    try:
+        with pytest.raises(OSError, match="output directory unavailable"):
+            derivative_module._claim_output_directory(parent_fd, "out")
+    finally:
+        os.close(parent_fd)
+
+    assert swapped
+    assert stat.S_IMODE((tmp_path / "out").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "moved").stat().st_mode) == 0o700
