@@ -1,25 +1,15 @@
-"""Local command-line adapter for the closed scanner result contract."""
+"""Local CLI with result-only stdout and optional capability-based derivative."""
 
 import argparse
 import os
+import stat
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import NoReturn
+from typing import BinaryIO, NoReturn
 
-from .derivative import (
-    close_installed_result,
-    close_publication,
-    compact_result_json,
-    destination_available,
-    installed_result_is_current,
-    publication_is_current,
-    revoke_installed_result,
-    revoke_publication,
-    write_result,
-)
+from .derivative import compact_result_json
 from .engine import scan_file
-from .limits import ScanLimits
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -30,60 +20,73 @@ class _ArgumentParser(argparse.ArgumentParser):
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = _ArgumentParser(prog="document-firewall", add_help=False)
     commands = parser.add_subparsers(dest="command", required=True)
-    scan = commands.add_parser("scan")
+    scan = commands.add_parser("scan", add_help=False)
     scan.add_argument("--input", type=Path, required=True)
-    scan.add_argument("--output-dir", type=Path, required=True)
-    scan.add_argument("--result", type=Path, required=True)
+    scan.add_argument("--derivative-fd", type=int)
     return parser.parse_args(argv)
 
 
-def _result_destination_is_safe(input_path: Path, output_dir: Path, result_path: Path) -> bool:
-    """Reject occupied targets and lexical overlap before any scan side effect."""
+def _write_all(stream: BinaryIO, contents: bytes) -> None:
+    written = 0
+    while written < len(contents):
+        count = stream.write(contents[written:])
+        if count is None:
+            count = len(contents) - written
+        if count <= 0:
+            raise OSError("short output write")
+        written += count
+    stream.flush()
+
+
+def _write_derivative(descriptor: int, derivative: str) -> None:
+    duplicate = os.dup(descriptor)
     try:
-        output_absolute = os.path.abspath(os.fspath(output_dir))
-        result_absolute = os.path.abspath(os.fspath(result_path))
-        if result_absolute == output_absolute or result_absolute.startswith(output_absolute + os.sep):
-            return False
-        if not destination_available(output_dir) or not destination_available(result_path):
-            return False
-    except (OSError, ValueError):
-        return False
-    return True
+        info = os.fstat(duplicate)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size != 0
+        ):
+            raise OSError("derivative capability invalid")
+        contents = derivative.encode("utf-8")
+        written = 0
+        while written < len(contents):
+            count = os.write(duplicate, contents[written:])
+            if count <= 0:
+                raise OSError("short derivative write")
+            written += count
+        os.fsync(duplicate)
+        if os.fstat(duplicate).st_size != len(contents):
+            raise OSError("derivative write invalid")
+    finally:
+        os.close(duplicate)
+
+
+def _opaque_stderr(message: str) -> None:
+    try:
+        sys.stderr.write(message)
+    except Exception:  # noqa: BLE001 -- diagnostics must not replace the original outcome.
+        return
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = _arguments(argv)
-    except (SystemExit, ValueError):
-        sys.stderr.write("scan arguments invalid\n")
+    except (SystemExit, ValueError, TypeError, OSError):
+        _opaque_stderr("scan arguments invalid\n")
         return 2
-    installed_result = None
-    artifacts = None
+
     try:
-        if not _result_destination_is_safe(args.input, args.output_dir, args.result):
-            raise ValueError("unsafe output")
-        artifacts = scan_file(args.input, args.output_dir, ScanLimits())
-        installed_result = write_result(args.result, artifacts.result)
-        if not publication_is_current(artifacts._publication) or not installed_result_is_current(
-            installed_result
-        ):
-            raise OSError("public output changed")
-        payload = compact_result_json(artifacts.result)
-        written = 0
-        while written < len(payload):
-            count = sys.stdout.buffer.write(payload[written:])
-            if count is None or count <= 0:
-                raise OSError("stdout write failed")
-            written += count
-        sys.stdout.buffer.flush()
-    except Exception:  # noqa: BLE001 -- public CLI boundary must stay source-free.
-        revoke_installed_result(installed_result)
-        revoke_publication(artifacts._publication if artifacts is not None else None)
-        sys.stderr.write("scan output failed\n")
+        artifacts = scan_file(args.input)
+        if args.derivative_fd is not None:
+            if artifacts.derivative_text is None:
+                raise OSError("derivative unavailable")
+            _write_derivative(args.derivative_fd, artifacts.derivative_text)
+        _write_all(sys.stdout.buffer, compact_result_json(artifacts.result))
+        return 0
+    except Exception:  # noqa: BLE001 -- CLI diagnostics are intentionally opaque.
+        _opaque_stderr("scan failed\n")
         return 1
-    close_installed_result(installed_result)
-    close_publication(artifacts._publication if artifacts is not None else None)
-    return 0
 
 
 if __name__ == "__main__":
