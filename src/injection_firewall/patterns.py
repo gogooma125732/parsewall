@@ -119,30 +119,51 @@ def encoded_block_findings(
     candidate: list[str] = []
     payload_length = 0
     whitespace_count = 0
+    segment_length = 0
+    longest_segment = 0
     has_base64_signal = False
-    has_lower = False
-    has_upper_or_digit = False
 
     def flush() -> None:
-        nonlocal candidate, payload_length, whitespace_count, has_base64_signal, has_lower, has_upper_or_digit
+        nonlocal candidate, payload_length, whitespace_count, segment_length, longest_segment, has_base64_signal
         if payload_length < _ENCODED_MINIMUM:
             candidate = []
             payload_length = 0
             whitespace_count = 0
+            segment_length = 0
+            longest_segment = 0
             has_base64_signal = False
-            has_lower = False
-            has_upper_or_digit = False
             return
         _check(check_deadline)
         encoded = "".join(candidate)
         decoded = _decode_encoded_block(encoded) if payload_length <= _ENCODED_DECODE_MAXIMUM else None
-        if whitespace_count and decoded is None and not (has_base64_signal or (has_lower and has_upper_or_digit)):
+        if whitespace_count > payload_length // 2:
+            findings.append(
+                Finding(
+                    RiskLevel.QUARANTINE,
+                    EvidenceCode.ENCODED_INSTRUCTION_PATTERN,
+                    location,
+                    AnomalyCode.LONG_ENCODED_BLOCK,
+                )
+            )
             candidate = []
             payload_length = 0
             whitespace_count = 0
+            segment_length = 0
+            longest_segment = 0
             has_base64_signal = False
-            has_lower = False
-            has_upper_or_digit = False
+            return
+        if (
+            whitespace_count
+            and decoded is None
+            and not has_base64_signal
+            and longest_segment < _ENCODED_MINIMUM
+        ):
+            candidate = []
+            payload_length = 0
+            whitespace_count = 0
+            segment_length = 0
+            longest_segment = 0
+            has_base64_signal = False
             return
         is_instruction = decoded is not None and bool(
             classify_instruction(
@@ -163,21 +184,22 @@ def encoded_block_findings(
         candidate = []
         payload_length = 0
         whitespace_count = 0
+        segment_length = 0
+        longest_segment = 0
         has_base64_signal = False
-        has_lower = False
-        has_upper_or_digit = False
 
     for index, character in enumerate(text):
         if index % 256 == 0:
             _check(check_deadline)
         if character in _ENCODED_ALPHABET:
             payload_length += 1
+            segment_length += 1
+            longest_segment = max(longest_segment, segment_length)
             has_base64_signal = has_base64_signal or character in "+/=_-"
-            has_lower = has_lower or character.islower()
-            has_upper_or_digit = has_upper_or_digit or character.isupper() or character.isdigit()
             if len(candidate) < _ENCODED_DECODE_MAXIMUM:
                 candidate.append(character)
-        elif character in {" ", "\n", "\r", "\t"} and payload_length:
+        elif character.isspace() and payload_length:
+            segment_length = 0
             if len(candidate) < _ENCODED_DECODE_MAXIMUM:
                 candidate.append(character)
             whitespace_count += 1

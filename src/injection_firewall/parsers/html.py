@@ -32,6 +32,9 @@ _EXTERNAL_ATTRIBUTES = frozenset(
     {"action", "background", "cite", "data", "formaction", "href", "poster", "src"}
 )
 _ACTIVE_SCHEMES = frozenset({"data", "file", "javascript", "vbscript"})
+_BLOCK_TAGS = frozenset(
+    {"address", "article", "aside", "blockquote", "div", "dl", "fieldset", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main", "nav", "ol", "p", "pre", "section", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul"}
+)
 _SIMPLE_SELECTOR = re.compile(
     r"^(?:(?P<tag>[A-Za-z][A-Za-z0-9-]{0,95}))?(?P<suffix>(?:[.#][A-Za-z][A-Za-z0-9_-]{0,95})*)$"
 )
@@ -166,6 +169,10 @@ class _VisibleHtml(HTMLParser):
         for token in tokens:
             if getattr(token, "type", "") == "ident" and getattr(token, "value", "").casefold() == "transparent":
                 return True
+            if getattr(token, "type", "") == "hash":
+                value = str(getattr(token, "value", "")).casefold()
+                if (len(value) == 4 and value[-1] == "0") or (len(value) == 8 and value[-2:] == "00"):
+                    return True
             if getattr(token, "type", "") == "function":
                 arguments = list(getattr(token, "arguments", []))
                 slash = next(
@@ -178,8 +185,19 @@ class _VisibleHtml(HTMLParser):
                 ]
                 if numeric and getattr(numeric[-1], "value", None) == 0:
                     return True
-                if getattr(token, "lower_name", "") in {"rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color"} and slash is not None:
+                if slash is not None and not numeric:
                     return True
+        return False
+
+    def _has_zero_filter_opacity(self, tokens: list[object]) -> bool:
+        for token in tokens:
+            if getattr(token, "type", "") != "function":
+                continue
+            arguments = list(getattr(token, "arguments", []))
+            if getattr(token, "lower_name", "") == "opacity" and self._is_zero(arguments):
+                return True
+            if self._has_zero_filter_opacity(arguments):
+                return True
         return False
 
     @staticmethod
@@ -228,6 +246,7 @@ class _VisibleHtml(HTMLParser):
                 or (name in {"opacity", "font-size"} and self._is_zero(value))
                 or (name in {"color", "background-color"} and self._has_transparent_color(value))
                 or (name == "transform" and "translate" in serialized)
+                or (name == "filter" and self._has_zero_filter_opacity(value))
             ):
                 hidden = True
             if name in {"left", "right", "top", "bottom", "text-indent"}:
@@ -300,6 +319,16 @@ class _VisibleHtml(HTMLParser):
             elif value.strip().casefold().startswith(tuple(f"{scheme}:" for scheme in _ACTIVE_SCHEMES)):
                 self._add_active(location)
 
+    def _append_hidden(self, hidden_text: list[str], text: str) -> None:
+        """Append bounded normalized hidden text while retaining semantic separation."""
+        normalized = normalize_visible_text(text, check_deadline=self.deadline.check)
+        buffer_id = id(hidden_text)
+        size = self._hidden_buffer_sizes.get(buffer_id, 0) + len(normalized)
+        if size > 32_768:
+            raise MemoryError
+        self._hidden_buffer_sizes[buffer_id] = size
+        hidden_text.append(normalized)
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.deadline.check()
         self._node += 1
@@ -331,6 +360,8 @@ class _VisibleHtml(HTMLParser):
             self._add_active(location)
         if tag not in _VOID_TAGS:
             inherited_buffer = self._stack[-1].hidden_text if inherited_hidden else None
+            if inherited_hidden and tag in _BLOCK_TAGS and inherited_buffer is not None:
+                self._append_hidden(inherited_buffer, " ")
             hidden_text = inherited_buffer if hidden else None
             self._stack.append(_Element(tag, self._node, hidden, hidden_text))
             if hidden and not inherited_hidden:
@@ -349,7 +380,9 @@ class _VisibleHtml(HTMLParser):
         element = self._stack.pop()
         inherited_hidden = bool(self._stack and self._stack[-1].hidden)
         if element.hidden and not inherited_hidden and element.hidden_text is not None:
-            hidden_text = "".join(element.hidden_text)
+            hidden_text = normalize_visible_text(
+                "".join(element.hidden_text), check_deadline=self.deadline.check
+            )
             self._hidden_buffer_sizes.pop(id(element.hidden_text), None)
             self.findings.extend(
                 classify_instruction(
@@ -359,6 +392,13 @@ class _VisibleHtml(HTMLParser):
                     check_deadline=self.deadline.check,
                 )
             )
+            self.findings.extend(
+                encoded_block_findings(
+                    hidden_text, location=self._location(element.node), check_deadline=self.deadline.check
+                )
+            )
+        elif element.hidden and inherited_hidden and element.tag in _BLOCK_TAGS and element.hidden_text is not None:
+            self._append_hidden(element.hidden_text, " ")
 
     def handle_data(self, data: str) -> None:
         self.deadline.check()
@@ -369,13 +409,7 @@ class _VisibleHtml(HTMLParser):
             hidden_text = self._stack[-1].hidden_text
             if hidden_text is None:
                 raise ValueError("missing hidden text buffer")
-            normalized = normalize_visible_text(data, check_deadline=self.deadline.check)
-            buffer_id = id(hidden_text)
-            size = self._hidden_buffer_sizes.get(buffer_id, 0) + len(normalized)
-            if size > 32_768:
-                raise MemoryError
-            self._hidden_buffer_sizes[buffer_id] = size
-            hidden_text.append(normalized)
+            self._append_hidden(hidden_text, data)
             self.findings.extend(encoded_block_findings(data, location=location, check_deadline=self.deadline.check))
             return
         self.findings.extend(classify_instruction(data, hidden=False, location=location, check_deadline=self.deadline.check))

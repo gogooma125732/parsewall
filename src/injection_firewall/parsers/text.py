@@ -34,6 +34,11 @@ def _label(value: str) -> str:
     return re.sub(r"\\(.)", r"\1", unescape(value)).casefold().strip()
 
 
+def _unescape_destination(value: str) -> str:
+    """Apply bounded Markdown punctuation escapes before URL classification."""
+    return re.sub(r"\\([!\"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])", r"\1", unescape(value))
+
+
 def _consume_bracket(contents: str, start: int, deadline: Deadline) -> tuple[str, int] | None:
     """Return escaped Markdown bracket content and its closing index."""
     for index in range(start + 1, min(len(contents), start + _MAX_MARKDOWN_TOKEN)):
@@ -91,7 +96,7 @@ def _consume_html_tag(contents: str, start: int, deadline: Deadline) -> tuple[st
 def _destination_finding(destination: str, findings: list[Finding], deadline: Deadline) -> bool:
     """Classify one untrusted link destination without retaining its text."""
     deadline.check()
-    value = unescape(destination.strip()).strip("<>")
+    value = _unescape_destination(destination.strip()).strip("<>")
     parsed = urlsplit(value)
     if parsed.scheme.casefold() in _ACTIVE_SCHEMES:
         findings.append(Finding(RiskLevel.QUARANTINE, EvidenceCode.ACTIVE_CONTENT_PRESENT, "text:line=1"))
@@ -102,16 +107,18 @@ def _destination_finding(destination: str, findings: list[Finding], deadline: De
     return False
 
 
-def _html_findings(token: str, findings: list[Finding], deadline: Deadline) -> bool:
+def _html_findings(token: str, findings: list[Finding], deadline: Deadline) -> tuple[bool, str | None]:
     """Inspect a raw HTML token conservatively without building a DOM derivative."""
     deadline.check()
     suppress = True
     findings.append(Finding(RiskLevel.REVIEW, EvidenceCode.VISIBLE_EXTRACTED_TEXT_MISMATCH, "text:line=1"))
     head = re.match(r"(?is)<\s*/?\s*([A-Za-z][A-Za-z0-9-]*)", token)
     if head is None:
-        return suppress
-    if head.group(1).casefold() in _ACTIVE_HTML_TAGS:
+        return suppress, None
+    tag = head.group(1).casefold()
+    if tag in _ACTIVE_HTML_TAGS:
         findings.append(Finding(RiskLevel.QUARANTINE, EvidenceCode.ACTIVE_CONTENT_PRESENT, "text:line=1"))
+    hidden_tag = None
     for match in _ATTRIBUTE.finditer(token[head.end() :]):
         deadline.check()
         name = match.group(1).casefold()
@@ -119,6 +126,7 @@ def _html_findings(token: str, findings: list[Finding], deadline: Deadline) -> b
         if name.startswith("on"):
             findings.append(Finding(RiskLevel.QUARANTINE, EvidenceCode.ACTIVE_CONTENT_PRESENT, "text:line=1"))
         if name in {"hidden", "style", "aria-hidden"}:
+            hidden_tag = tag
             findings.append(
                 Finding(
                     RiskLevel.REVIEW,
@@ -129,32 +137,42 @@ def _html_findings(token: str, findings: list[Finding], deadline: Deadline) -> b
             )
         if name in _URL_HTML_ATTRIBUTES:
             _destination_finding(value, findings, deadline)
-    return suppress
+    return suppress, hidden_tag
 
 
 def _reference_definitions(contents: str, deadline: Deadline) -> dict[str, str]:
     """Collect bounded reference definitions before scanning link uses."""
     definitions: dict[str, str] = {}
-    for index, character in enumerate(contents):
-        if index % 256 == 0:
-            deadline.check()
-        if character != "[" or (index and contents[index - 1] not in {"\n", "\r"}):
+    line_start = 0
+    while line_start < len(contents):
+        deadline.check()
+        line_end = contents.find("\n", line_start)
+        if line_end < 0:
+            line_end = len(contents)
+        cursor = line_start
+        while cursor < line_end and cursor - line_start < 3 and contents[cursor] in {" ", "\t"}:
+            cursor += 1
+        if cursor >= line_end or contents[cursor] != "[":
+            line_start = line_end + 1
             continue
-        label = _consume_bracket(contents, index, deadline)
+        label = _consume_bracket(contents, cursor, deadline)
         if label is None:
+            line_start = line_end + 1
             continue
         raw_label, close = label
-        cursor = close + 1
-        if cursor >= len(contents) or contents[cursor] != ":":
+        destination_start = close + 1
+        if destination_start >= line_end or contents[destination_start] != ":":
+            line_start = line_end + 1
             continue
-        cursor += 1
-        while cursor < len(contents) and contents[cursor] in {" ", "\t"}:
-            cursor += 1
-        end = cursor
-        while end < len(contents) and contents[end] not in {" ", "\t", "\r", "\n"}:
+        destination_start += 1
+        while destination_start < line_end and contents[destination_start] in {" ", "\t"}:
+            destination_start += 1
+        end = destination_start
+        while end < line_end and contents[end] not in {" ", "\t", "\r", "\n"}:
             end += 1
-        if end > cursor:
-            definitions[_label(raw_label)] = contents[cursor:end]
+        if end > destination_start:
+            definitions[_label(raw_label)] = contents[destination_start:end]
+        line_start = line_end + 1
     return definitions
 
 
@@ -174,7 +192,26 @@ def _add_markdown_findings(contents: str, findings: list[Finding], deadline: Dea
                 suppress_derivative = True
             else:
                 raw, end = token
-                suppress_derivative = _html_findings(raw, findings, deadline) or suppress_derivative
+                raw_suppressed, hidden_tag = _html_findings(raw, findings, deadline)
+                suppress_derivative = raw_suppressed or suppress_derivative
+                if hidden_tag is not None and not raw.lstrip().startswith("</"):
+                    closing = re.compile(rf"(?is)</\s*{re.escape(hidden_tag)}\s*>").search(
+                        contents, end + 1, min(len(contents), end + 1 + _MAX_MARKDOWN_TOKEN)
+                    )
+                    if closing is None:
+                        findings.append(
+                            Finding(RiskLevel.QUARANTINE, EvidenceCode.ACTIVE_CONTENT_PRESENT, "text:line=1")
+                        )
+                    else:
+                        body = re.sub(r"(?is)<[^>]{0,8192}>", " ", contents[end + 1 : closing.start()])
+                        findings.extend(
+                            classify_instruction(
+                                body, hidden=True, location="text:line=1", check_deadline=deadline.check
+                            )
+                        )
+                        findings.extend(
+                            encoded_block_findings(body, location="text:line=1", check_deadline=deadline.check)
+                        )
                 index = end
         link_start = index + 1 if character == "!" and index + 1 < len(contents) and contents[index + 1] == "[" else index
         if contents[link_start : link_start + 1] == "[":
