@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from html.parser import HTMLParser
+from math import isfinite
 from urllib.parse import urlsplit
 
 import tinycss2  # type: ignore[import-untyped]
@@ -170,19 +171,33 @@ class _VisibleHtml(HTMLParser):
         return getattr(token, "type", "") in {"number", "percentage", "dimension"} and getattr(token, "value", None) == 0
 
     @staticmethod
-    def _alpha_literal_proof(tokens: list[object]) -> _VisibilityProof:
+    def _opacity_threshold_proof(
+        value: object, *, percentage: bool = False
+    ) -> _VisibilityProof:
+        if not isinstance(value, (int, float)) or not isfinite(value):
+            return _VisibilityProof.UNCERTAIN
+        opaque_threshold = 100 if percentage else 1
+        return (
+            _VisibilityProof.VISIBLE
+            if value >= opaque_threshold
+            else _VisibilityProof.HIDDEN
+        )
+
+    @classmethod
+    def _opacity_literal_proof(cls, tokens: list[object]) -> _VisibilityProof:
         significant = [
             token for token in tokens if getattr(token, "type", "") != "whitespace"
         ]
         if len(significant) != 1:
             return _VisibilityProof.UNCERTAIN
         token = significant[0]
-        if getattr(token, "type", "") not in {"number", "percentage"}:
+        token_type = getattr(token, "type", "")
+        if token_type not in {"number", "percentage"}:
             return _VisibilityProof.UNCERTAIN
         value = getattr(token, "value", None)
-        if not isinstance(value, (int, float)):
-            return _VisibilityProof.UNCERTAIN
-        return _VisibilityProof.HIDDEN if value <= 0 else _VisibilityProof.VISIBLE
+        return cls._opacity_threshold_proof(
+            value, percentage=token_type == "percentage"
+        )
 
     @staticmethod
     def _hue_is_literal(token: object) -> bool:
@@ -204,9 +219,7 @@ class _VisibleHtml(HTMLParser):
         if token_type in {"ident", "hash"}:
             parsed = parse_color(token)
             alpha = getattr(parsed, "alpha", None)
-            if isinstance(alpha, (int, float)):
-                return _VisibilityProof.HIDDEN if alpha <= 0 else _VisibilityProof.VISIBLE
-            return _VisibilityProof.UNCERTAIN
+            return cls._opacity_threshold_proof(alpha)
         if token_type != "function":
             return _VisibilityProof.UNCERTAIN
 
@@ -257,7 +270,7 @@ class _VisibleHtml(HTMLParser):
                 )
             if name not in {"rgba", "hsla"}:
                 return _VisibilityProof.UNCERTAIN
-            return cls._alpha_literal_proof(groups[3])
+            return cls._opacity_literal_proof(groups[3])
 
         channel_tokens = arguments[: slash_indexes[0]] if slash_indexes else arguments
         channels = [item for item in channel_tokens if getattr(item, "type", "") != "whitespace"]
@@ -277,7 +290,7 @@ class _VisibleHtml(HTMLParser):
         if not channels_are_literals:
             return _VisibilityProof.UNCERTAIN
         if slash_indexes:
-            return cls._alpha_literal_proof(arguments[slash_indexes[0] + 1 :])
+            return cls._opacity_literal_proof(arguments[slash_indexes[0] + 1 :])
         return _VisibilityProof.VISIBLE
 
     @classmethod
@@ -300,7 +313,7 @@ class _VisibleHtml(HTMLParser):
             arguments = list(getattr(token, "arguments", []))
             name = str(getattr(token, "lower_name", ""))
             if name == "opacity":
-                opacity_proof = cls._alpha_literal_proof(arguments)
+                opacity_proof = cls._opacity_literal_proof(arguments)
                 if opacity_proof is _VisibilityProof.HIDDEN:
                     return opacity_proof
                 if opacity_proof is _VisibilityProof.UNCERTAIN:
@@ -352,7 +365,7 @@ class _VisibleHtml(HTMLParser):
                 hidden = True
             visibility_proof = _VisibilityProof.VISIBLE
             if name == "opacity":
-                visibility_proof = self._alpha_literal_proof(value)
+                visibility_proof = self._opacity_literal_proof(value)
             elif name in {"color", "background-color"}:
                 visibility_proof = self._color_visibility_proof(value)
             elif name == "filter":
