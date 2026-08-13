@@ -174,7 +174,13 @@ def _member_depth(name: str) -> int:
 
 
 def _canonical_member_name(name: str) -> tuple[str, bool]:
-    if not name or name.startswith(("/", "\\")) or "\\" in name or "\x00" in name:
+    if (
+        not name
+        or name.startswith(("/", "\\"))
+        or "\\" in name
+        or "\x00" in name
+        or (len(name) >= 2 and name[0].isascii() and name[0].isalpha() and name[1] == ":")
+    ):
         raise _CorruptContainer
     is_directory = name.endswith("/")
     candidate = name[:-1] if is_directory else name
@@ -296,11 +302,13 @@ def _parse_content_types(contents: bytes, members: tuple[_CentralMember, ...]) -
         root = fromstring(contents)
     except (DefusedXmlException, ParseError, UnicodeError) as error:
         raise _CorruptContainer from error
-    if root.tag != _TYPES_TAG:
+    if root.tag != _TYPES_TAG or root.attrib or not _is_whitespace(root.text):
         raise _CorruptContainer
     defaults: set[str] = set()
     overrides: dict[str, str] = {}
     for child in root:
+        if list(child) or not _is_whitespace(child.text) or not _is_whitespace(child.tail):
+            raise _CorruptContainer
         if child.tag == _DEFAULT_TAG:
             extension = child.get("Extension")
             content_type = child.get("ContentType")
@@ -342,6 +350,34 @@ def _parse_content_types(contents: bytes, members: tuple[_CentralMember, ...]) -
     if main_part not in member_names:
         raise _CorruptContainer
     return document_format
+
+
+def _is_whitespace(value: str | None) -> bool:
+    return value is None or not value.strip()
+
+
+def _create_snapshot() -> tuple[BinaryIO, Path]:
+    """Create a private snapshot, closing and removing it on setup failure."""
+    descriptor = -1
+    snapshot_path: Path | None = None
+    try:
+        descriptor, snapshot_name = tempfile.mkstemp()
+        snapshot_path = Path(snapshot_name)
+        snapshot = os.fdopen(descriptor, "w+b", closefd=True)
+        descriptor = -1
+        return snapshot, snapshot_path
+    except (MemoryError, OSError, RuntimeError, ValueError):
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if snapshot_path is not None:
+            try:
+                snapshot_path.unlink()
+            except OSError:
+                pass
+        raise
 
 
 def _inspect_zip(
@@ -475,9 +511,11 @@ def verify_source(path: Path, limits: ScanLimits) -> VerifiedSource:
         ):
             return VerifiedSource(_failed_report(EvidenceCode.CORRUPT_DOCUMENT, size=expected.st_size), None)
         digest = hashlib.sha256()
-        snapshot_descriptor, snapshot_name = tempfile.mkstemp()
-        snapshot: BinaryIO | None = os.fdopen(snapshot_descriptor, "w+b", closefd=True)
-        snapshot_path = Path(snapshot_name)
+        try:
+            snapshot_handle, snapshot_path = _create_snapshot()
+        except (MemoryError, OSError, RuntimeError, ValueError) as error:
+            return VerifiedSource(_failure_report(error, size=opened.st_size), None)
+        snapshot: BinaryIO | None = snapshot_handle
         handed_off = False
         try:
             assert snapshot is not None

@@ -3,6 +3,7 @@ import os
 import struct
 import zipfile
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
@@ -331,3 +332,138 @@ def test_ooxml_main_part_cannot_be_a_directory_entry(tmp_path: Path):
     report = inspect_source(source, ScanLimits())
 
     assert report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
+
+
+@pytest.mark.parametrize(
+    "content_types",
+    [
+        WORD_TYPES.replace(b"<Types ", b'<Types unexpected="attribute" ', 1),
+        WORD_TYPES.replace(b"/>", b"><unexpected/></Override>", 1),
+        WORD_TYPES.replace(b"/>", b">text</Override>", 1),
+    ],
+)
+def test_ooxml_content_types_rejects_noncanonical_structure(tmp_path: Path, content_types: bytes):
+    source = tmp_path / "noncanonical.docx"
+    write_docx(source, content_types, ("word/document.xml", b"<document/>"))
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
+
+
+@pytest.mark.parametrize("unsafe_name", ["C:/word/document.xml", "C:\\word\\document.xml", "\\\\host\\share\\document.xml"])
+def test_drive_and_unc_qualified_zip_member_name_is_rejected(tmp_path: Path, unsafe_name: str):
+    source = tmp_path / "drive.docx"
+    write_docx(source, WORD_TYPES, (unsafe_name, b"x"), ("word/document.xml", b"x"))
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
+
+
+def test_same_size_source_mutation_during_copy_returns_no_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "mutation.txt"
+    source.write_bytes(b"x" * 32)
+    original_read = os.read
+    calls = 0
+
+    def mutate_after_read(fd: int, size: int) -> bytes:
+        nonlocal calls
+        result = original_read(fd, size)
+        calls += 1
+        if calls == 1:
+            with source.open("r+b") as writer:
+                writer.write(b"y" * 32)
+        return result
+
+    monkeypatch.setattr("injection_firewall.preflight.os.read", mutate_after_read)
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.sha256 == ""
+    assert report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
+
+
+def test_short_read_before_declared_size_returns_no_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "short.txt"
+    source.write_bytes(b"x" * 32)
+    monkeypatch.setattr("injection_firewall.preflight.os.read", lambda _fd, _size: b"")
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.sha256 == ""
+    assert report.findings[0].evidence is EvidenceCode.CORRUPT_DOCUMENT
+
+
+def test_timeout_inside_central_directory_loop_closes_before_zipfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "record-timeout.docx"
+    write_docx(source, WORD_TYPES, ("word/document.xml", b"<document/>"))
+    seen_eocd = False
+    original_find_eocd = __import__("injection_firewall.preflight", fromlist=["_find_eocd"])._find_eocd
+
+    def record_eocd(*args: object) -> tuple[int, int, int, int]:
+        nonlocal seen_eocd
+        result = original_find_eocd(*args)
+        seen_eocd = True
+        return result
+
+    def monotonic() -> float:
+        return 2.0 if seen_eocd else 0.0
+
+    def must_not_construct_zipfile(*_: object, **__: object) -> None:
+        raise AssertionError("record-loop timeout must run before ZipFile")
+
+    monkeypatch.setattr("injection_firewall.preflight._find_eocd", record_eocd)
+    monkeypatch.setattr("injection_firewall.preflight.time.monotonic", monotonic)
+    monkeypatch.setattr("injection_firewall.preflight.zipfile.ZipFile", must_not_construct_zipfile)
+
+    report = inspect_source(source, ScanLimits(max_seconds=1.0))
+
+    assert seen_eocd
+    assert report.findings[0].evidence is EvidenceCode.RESOURCE_LIMIT_EXCEEDED
+
+
+def test_snapshot_mkstemp_failure_is_sanitized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source = tmp_path / "mkstemp.txt"
+    source.write_text("safe", encoding="utf-8")
+
+    def fail_mkstemp() -> tuple[int, str]:
+        raise OSError("document path must not leak")
+
+    monkeypatch.setattr("injection_firewall.preflight.tempfile.mkstemp", fail_mkstemp)
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.sha256 == ""
+    assert report.findings[0].risk_level is RiskLevel.QUARANTINE
+    assert "document path" not in repr(report)
+
+
+def test_snapshot_fdopen_failure_closes_and_unlinks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source = tmp_path / "fdopen.txt"
+    source.write_text("safe", encoding="utf-8")
+    snapshot_path = tmp_path / "failed-snapshot"
+    descriptor = os.open(snapshot_path, os.O_CREAT | os.O_RDWR, 0o600)
+
+    monkeypatch.setattr(
+        "injection_firewall.preflight.tempfile.mkstemp", lambda: (descriptor, str(snapshot_path))
+    )
+
+    def fail_fdopen(*_: object, **__: object) -> BinaryIO:
+        raise OSError("snapshot setup failed")
+
+    monkeypatch.setattr("injection_firewall.preflight.os.fdopen", fail_fdopen)
+
+    report = inspect_source(source, ScanLimits())
+
+    assert report.sha256 == ""
+    assert report.findings[0].risk_level is RiskLevel.QUARANTINE
+    assert not snapshot_path.exists()
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
