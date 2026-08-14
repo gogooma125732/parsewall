@@ -5,10 +5,17 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.datastructures import UploadFile
 
 from .job_store import JobStatus, JobStore
+from .ui import PAGE, SCRIPT, STYLES
+
+_UI_CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+    "img-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; "
+    "form-action 'self'; frame-ancestors 'none'"
+)
 
 
 def create_app(store_root: Path | None = None) -> FastAPI:
@@ -22,7 +29,21 @@ def create_app(store_root: Path | None = None) -> FastAPI:
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Frame-Options"] = "DENY"
         return response
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def home() -> HTMLResponse:
+        return HTMLResponse(PAGE, headers={"Content-Security-Policy": _UI_CSP})
+
+    @app.get("/assets/firewall.css", response_class=Response, include_in_schema=False)
+    def styles() -> Response:
+        return Response(STYLES, media_type="text/css; charset=utf-8")
+
+    @app.get("/assets/firewall.js", response_class=Response, include_in_schema=False)
+    def script() -> Response:
+        return Response(SCRIPT, media_type="text/javascript; charset=utf-8")
 
     @app.get("/healthz")
     def health() -> dict[str, str]:

@@ -25,6 +25,11 @@ docker compose up --build
 curl -F file=@report.pdf http://127.0.0.1:8000/v1/scans
 ```
 
+Open `http://127.0.0.1:8000/` for the local browser upload interface. It
+uploads one supported file, follows the isolated worker status, displays only
+the fixed public result fields, and exposes a derivative download only for
+`low` results. The interactive OpenAPI explorer remains at `/docs`.
+
 The API only accepts uploads and serves status/results. A separate worker scans
 jobs with no network, a read-only root filesystem, no Linux capabilities, and
 bounded CPU, memory, processes, and temporary storage.
