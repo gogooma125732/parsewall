@@ -38,7 +38,7 @@ def _deny() -> dict[str, object]:
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": "Raw document access blocked; inspect it with Document Injection Firewall first.",
+            "permissionDecisionReason": "Raw document access blocked; inspect it with Parsewall first.",
         }
     }
 

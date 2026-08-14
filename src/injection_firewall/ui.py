@@ -6,7 +6,7 @@ PAGE = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Document Injection Firewall</title>
+  <title>Parsewall</title>
   <link rel="stylesheet" href="/assets/firewall.css">
   <script src="/assets/firewall.js" defer></script>
 </head>
@@ -16,7 +16,7 @@ PAGE = """<!doctype html>
       <div class="brand-mark" aria-hidden="true">DIF</div>
       <div>
         <p class="eyebrow">LOCAL · DETERMINISTIC · FAIL-CLOSED</p>
-        <h1>Document Injection Firewall</h1>
+        <h1>Parsewall</h1>
         <p class="lede">AI가 파일을 읽기 전에 숨겨진 명령과 구조적 이상을 먼저 검사합니다.</p>
       </div>
     </header>

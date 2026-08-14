@@ -21,7 +21,7 @@ _UI_CSP = (
 def create_app(store_root: Path | None = None) -> FastAPI:
     root = store_root or Path(os.environ.get("DIF_JOB_STORE", "/var/lib/dif/jobs"))
     store = JobStore(root)
-    app = FastAPI(title="Document Injection Firewall", version="1.0.0")
+    app = FastAPI(title="Parsewall", version="1.0.0")
     app.state.store = store
 
     @app.middleware("http")

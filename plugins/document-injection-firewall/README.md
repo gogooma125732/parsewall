@@ -1,4 +1,4 @@
-# Document Injection Firewall Codex plugin
+# Parsewall Codex plugin
 
 This plugin adds the `inspect-untrusted-files` skill, a fail-closed
 `PreToolUse` hook, and a local stdio MCP server. Install the matching Python

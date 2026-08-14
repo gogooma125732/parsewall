@@ -18,7 +18,7 @@ def test_browser_ui_is_available_with_strict_security_headers(tmp_path: Path) ->
     assert response.headers["content-security-policy"].startswith("default-src 'none'")
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["referrer-policy"] == "no-referrer"
-    assert "Document Injection Firewall" in response.text
+    assert "Parsewall" in response.text
     assert 'id="scan-form"' in response.text
     assert 'src="/assets/firewall.js"' in response.text
 

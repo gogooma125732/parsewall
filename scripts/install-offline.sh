@@ -17,4 +17,4 @@ docker compose --env-file .env -f compose.yaml up -d --pull never
 ./verify.sh
 
 port=$(sed -n 's/^DIF_PORT=//p' .env | tail -n 1)
-printf '%s\n' "Document Injection Firewall is running at http://127.0.0.1:${port:-8000}/"
+printf '%s\n' "Parsewall is running at http://127.0.0.1:${port:-8000}/"

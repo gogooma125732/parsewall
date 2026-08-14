@@ -64,6 +64,7 @@ def build_compose(output: Path, version: str) -> Path:
         ROOT / ".env.example",
         ROOT / "Dockerfile",
         ROOT / "README.md",
+        ROOT / "assets",
         ROOT / "compose.yaml",
         ROOT / "pyproject.toml",
         ROOT / "uv.lock",
@@ -176,7 +177,7 @@ def build_plugin(output: Path, version: str) -> tuple[Path, Path]:
         shutil.copytree(plugin, marketplace / "plugins" / plugin.name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         manifest = {
             "name": "document-injection-firewall-local",
-            "interface": {"displayName": "Document Injection Firewall Local"},
+            "interface": {"displayName": "Parsewall Local"},
             "plugins": [
                 {
                     "name": plugin.name,

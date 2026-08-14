@@ -34,6 +34,7 @@ def test_plugin_manifest_is_closed_and_version_matches_python_package() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text("utf-8")
 
     assert manifest["name"] == "document-injection-firewall"
+    assert manifest["interface"]["displayName"] == "Parsewall"
     assert f'version = "{manifest["version"]}"' in pyproject
     assert manifest["skills"] == "./skills/"
     assert manifest["mcpServers"] == "./.mcp.json"
@@ -63,6 +64,7 @@ def test_compose_release_archive_contains_one_command_installer(tmp_path: Path) 
     assert f"{prefix}/scripts/install-local.sh" in names
     assert f"{prefix}/scripts/verify-local.sh" in names
     assert f"{prefix}/src/injection_firewall/api.py" in names
+    assert f"{prefix}/assets/parsewall-wordmark.png" in names
 
 
 def test_codex_release_contains_plugin_hook_mcp_and_marketplace_policy(

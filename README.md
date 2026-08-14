@@ -1,6 +1,13 @@
-# Document Injection Firewall
+<p align="center">
+  <img src="assets/parsewall-wordmark.png" alt="Parsewall" width="760">
+</p>
 
-A deterministic, fail-closed pre-LLM scanner for untrusted uploaded documents.
+# Parsewall
+
+**Make every file inert before it reaches the model.**
+
+Parsewall is a deterministic, fail-closed pre-LLM scanner for untrusted
+uploaded documents.
 It never asks an LLM to decide whether a document is safe. It parses bounded
 structures, renders visual formats, compares OCR with embedded text, and returns
 only this public result contract:

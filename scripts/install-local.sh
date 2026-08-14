@@ -14,4 +14,4 @@ docker compose build
 docker compose up -d --pull never
 "$SCRIPT_DIR/verify-local.sh"
 
-printf '%s\n' "Document Injection Firewall is running at http://127.0.0.1:8000/"
+printf '%s\n' "Parsewall is running at http://127.0.0.1:8000/"
