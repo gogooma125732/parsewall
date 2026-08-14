@@ -30,6 +30,9 @@ uploads one supported file, follows the isolated worker status, displays only
 the fixed public result fields, and exposes a derivative download only for
 `low` results. The interactive OpenAPI explorer remains at `/docs`.
 
+For the versioned one-command installation and operational checks, see
+[`deploy/LOCAL_INSTALL.md`](deploy/LOCAL_INSTALL.md).
+
 The API only accepts uploads and serves status/results. A separate worker scans
 jobs with no network, a read-only root filesystem, no Linux capabilities, and
 bounded CPU, memory, processes, and temporary storage.
@@ -44,6 +47,28 @@ Endpoints:
 Supported inputs are UTF-8/UTF-16 text, Markdown, HTML, DOCX, PPTX, XLSX, PDF,
 PNG, and JPEG. Unsupported, corrupt, encrypted, incomplete, or dependency-
 blocked scans fail closed.
+
+## Build distribution artifacts
+
+Build the four distribution channels in order after the versioned Docker image
+exists locally:
+
+```sh
+python3 scripts/build_release.py --channel all --clean
+```
+
+Artifacts are written under `dist/releases/<version>/` with SHA-256 hashes and
+a machine-readable release manifest:
+
+1. source-backed Docker Compose local installer (`*-compose.tar.gz`);
+2. architecture-specific offline Docker bundle (`*-offline-<platform>.tar`);
+3. Python wheel and sdist (`python/`);
+4. standalone Codex plugin and local marketplace ZIP files.
+
+Installation details are in [`deploy/LOCAL_INSTALL.md`](deploy/LOCAL_INSTALL.md),
+[`deploy/OFFLINE_INSTALL.md`](deploy/OFFLINE_INSTALL.md),
+[`deploy/PYTHON_CLI.md`](deploy/PYTHON_CLI.md), and
+[`deploy/CODEX_PLUGIN.md`](deploy/CODEX_PLUGIN.md).
 
 ## Codex plugin and MCP
 
