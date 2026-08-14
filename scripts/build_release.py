@@ -207,7 +207,7 @@ def write_manifest(output: Path, version: str) -> None:
                 "size": path.stat().st_size,
             }
         )
-    manifest = {"name": "document-injection-firewall", "version": version, "artifacts": artifacts}
+    manifest = {"name": "parsewall", "version": version, "artifacts": artifacts}
     (output / "release-manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

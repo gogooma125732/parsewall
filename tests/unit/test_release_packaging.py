@@ -41,6 +41,15 @@ def test_plugin_manifest_is_closed_and_version_matches_python_package() -> None:
     assert "apps" not in manifest
 
 
+def test_python_distribution_uses_parsewall_brand_with_compatibility_scripts() -> None:
+    pyproject = (ROOT / "pyproject.toml").read_text("utf-8")
+
+    assert 'name = "parsewall"' in pyproject
+    assert 'Homepage = "https://github.com/gogooma125732/parsewall"' in pyproject
+    assert 'parsewall = "injection_firewall.cli:main"' in pyproject
+    assert 'document-firewall = "injection_firewall.cli:main"' in pyproject
+
+
 def test_compose_release_archive_contains_one_command_installer(tmp_path: Path) -> None:
     completed = subprocess.run(
         [

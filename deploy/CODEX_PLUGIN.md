@@ -1,6 +1,6 @@
 # Codex Plugin, Hook, and MCP
 
-Install the Python wheel first so `document-firewall-mcp` is on the process
+Install the Python wheel first so `parsewall-mcp` is on the process
 `PATH`. Then extract the marketplace archive and register its root:
 
 ```sh

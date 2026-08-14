@@ -2,6 +2,13 @@
 
 The wheel provides these console commands:
 
+- `parsewall`
+- `parsewall-api`
+- `parsewall-worker`
+- `parsewall-mcp`
+
+The original `document-firewall*` commands remain compatibility aliases:
+
 - `document-firewall`
 - `document-firewall-api`
 - `document-firewall-worker`
@@ -12,8 +19,8 @@ Install the wheel in a dedicated Python 3.11+ environment. For example:
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install document_injection_firewall-0.1.0-py3-none-any.whl
-document-firewall scan --input ./report.txt
+python -m pip install parsewall-0.1.0-py3-none-any.whl
+parsewall scan --input ./report.txt
 ```
 
 The scanner emits only the fixed four-field JSON result on stdout. A marked

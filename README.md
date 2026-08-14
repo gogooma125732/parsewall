@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/parsewall-logo.png" alt="Parsewall" width="560">
+  <img src="https://raw.githubusercontent.com/gogooma125732/parsewall/main/assets/parsewall-logo.png" alt="Parsewall" width="560">
 </p>
 
 <h1 align="center">Parsewall</h1>
@@ -8,7 +8,7 @@
 
 <p align="center">
   <img alt="Release v0.1.0" src="https://img.shields.io/badge/release-v0.1.0-EF4444?style=for-the-badge">
-  <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-F59E0B?style=for-the-badge&logo=python&logoColor=white">
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-F59E0B?style=for-the-badge&logo=python&logoColor=white">
   <img alt="Docker Compose ready" src="https://img.shields.io/badge/docker-compose_ready-2496ED?style=for-the-badge&logo=docker&logoColor=white">
 </p>
 
@@ -20,9 +20,9 @@
 
 <p align="center">
   <a href="#run-the-isolated-http-product">Quick start</a> ·
-  <a href="deploy/LOCAL_INSTALL.md">Local install</a> ·
-  <a href="deploy/OFFLINE_INSTALL.md">Offline install</a> ·
-  <a href="deploy/CODEX_PLUGIN.md">Codex plugin</a>
+  <a href="https://github.com/gogooma125732/parsewall/blob/main/deploy/LOCAL_INSTALL.md">Local install</a> ·
+  <a href="https://github.com/gogooma125732/parsewall/blob/main/deploy/OFFLINE_INSTALL.md">Offline install</a> ·
+  <a href="https://github.com/gogooma125732/parsewall/blob/main/deploy/CODEX_PLUGIN.md">Codex plugin</a>
 </p>
 
 Parsewall is a deterministic, fail-closed pre-LLM scanner for untrusted
@@ -44,6 +44,17 @@ Even a `low` result does not make document content trusted. A low-only plain
 UTF-8 derivative is prefixed with an untrusted-data marker and must remain data,
 never an instruction source.
 
+## Install the Python CLI
+
+```sh
+python -m pip install parsewall
+parsewall scan --input ./report.txt
+```
+
+The package also installs `parsewall-api`, `parsewall-worker`, and
+`parsewall-mcp`. The original `document-firewall*` commands remain available as
+compatibility aliases.
+
 ## Run the isolated HTTP product
 
 ```sh
@@ -57,7 +68,7 @@ the fixed public result fields, and exposes a derivative download only for
 `low` results. The interactive OpenAPI explorer remains at `/docs`.
 
 For the versioned one-command installation and operational checks, see
-[`deploy/LOCAL_INSTALL.md`](deploy/LOCAL_INSTALL.md).
+[`deploy/LOCAL_INSTALL.md`](https://github.com/gogooma125732/parsewall/blob/main/deploy/LOCAL_INSTALL.md).
 
 The API only accepts uploads and serves status/results. A separate worker scans
 jobs with no network, a read-only root filesystem, no Linux capabilities, and
@@ -91,10 +102,10 @@ a machine-readable release manifest:
 3. Python wheel and sdist (`python/`);
 4. standalone Codex plugin and local marketplace ZIP files.
 
-Installation details are in [`deploy/LOCAL_INSTALL.md`](deploy/LOCAL_INSTALL.md),
-[`deploy/OFFLINE_INSTALL.md`](deploy/OFFLINE_INSTALL.md),
-[`deploy/PYTHON_CLI.md`](deploy/PYTHON_CLI.md), and
-[`deploy/CODEX_PLUGIN.md`](deploy/CODEX_PLUGIN.md).
+Installation details are in [`deploy/LOCAL_INSTALL.md`](https://github.com/gogooma125732/parsewall/blob/main/deploy/LOCAL_INSTALL.md),
+[`deploy/OFFLINE_INSTALL.md`](https://github.com/gogooma125732/parsewall/blob/main/deploy/OFFLINE_INSTALL.md),
+[`deploy/PYTHON_CLI.md`](https://github.com/gogooma125732/parsewall/blob/main/deploy/PYTHON_CLI.md), and
+[`deploy/CODEX_PLUGIN.md`](https://github.com/gogooma125732/parsewall/blob/main/deploy/CODEX_PLUGIN.md).
 
 ## Codex plugin and MCP
 

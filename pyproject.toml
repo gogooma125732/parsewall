@@ -3,10 +3,24 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "document-injection-firewall"
+name = "parsewall"
 version = "0.1.0"
-description = "Closed result contract for document injection scanning"
+description = "Fail-closed document inspection before untrusted files reach an LLM"
+readme = "README.md"
+authors = [{ name = "Parsewall maintainers" }]
 requires-python = ">=3.11"
+keywords = ["ai-security", "llm-security", "prompt-injection", "document-security"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+]
 dependencies = [
   "defusedxml>=0.7.1",
   "fastapi>=0.116",
@@ -20,7 +34,17 @@ dependencies = [
   "uvicorn>=0.35",
 ]
 
+[project.urls]
+Homepage = "https://github.com/gogooma125732/parsewall"
+Repository = "https://github.com/gogooma125732/parsewall.git"
+Issues = "https://github.com/gogooma125732/parsewall/issues"
+Releases = "https://github.com/gogooma125732/parsewall/releases"
+
 [project.scripts]
+parsewall = "injection_firewall.cli:main"
+parsewall-api = "injection_firewall.api:main"
+parsewall-worker = "injection_firewall.worker:main"
+parsewall-mcp = "injection_firewall.mcp_server:main"
 document-firewall = "injection_firewall.cli:main"
 document-firewall-api = "injection_firewall.api:main"
 document-firewall-worker = "injection_firewall.worker:main"
