@@ -168,15 +168,15 @@ def _zip_tree(source: Path, destination: Path, prefix: Path) -> None:
 
 def build_plugin(output: Path, version: str) -> tuple[Path, Path]:
     plugin = ROOT / "plugins" / "document-injection-firewall"
-    plugin_archive = output / f"document-injection-firewall-codex-plugin-{version}.zip"
+    plugin_archive = output / f"parsewall-codex-plugin-{version}.zip"
     _zip_tree(plugin, plugin_archive, Path(plugin.name))
 
-    marketplace_archive = output / f"document-injection-firewall-codex-marketplace-{version}.zip"
+    marketplace_archive = output / f"parsewall-codex-marketplace-{version}.zip"
     with tempfile.TemporaryDirectory(prefix="dif-marketplace-") as temporary:
-        marketplace = Path(temporary) / "document-injection-firewall-marketplace"
+        marketplace = Path(temporary) / "parsewall-marketplace"
         shutil.copytree(plugin, marketplace / "plugins" / plugin.name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         manifest = {
-            "name": "document-injection-firewall-local",
+            "name": "parsewall-local",
             "interface": {"displayName": "Parsewall Local"},
             "plugins": [
                 {

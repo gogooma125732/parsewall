@@ -41,6 +41,29 @@ def test_plugin_manifest_is_closed_and_version_matches_python_package() -> None:
     assert "apps" not in manifest
 
 
+def test_repository_is_a_codex_marketplace_for_the_parsewall_plugin() -> None:
+    marketplace = json.loads(
+        (ROOT / ".agents/plugins/marketplace.json").read_text("utf-8")
+    )
+
+    assert marketplace["name"] == "parsewall"
+    assert marketplace["interface"]["displayName"] == "Parsewall"
+    assert marketplace["plugins"] == [
+        {
+            "name": "document-injection-firewall",
+            "source": {
+                "source": "local",
+                "path": "./plugins/document-injection-firewall",
+            },
+            "policy": {
+                "installation": "AVAILABLE",
+                "authentication": "ON_INSTALL",
+            },
+            "category": "Developer Tools",
+        }
+    ]
+
+
 def test_python_distribution_uses_parsewall_brand_with_compatibility_scripts() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text("utf-8")
 
@@ -108,8 +131,11 @@ def test_codex_release_contains_plugin_hook_mcp_and_marketplace_policy(
 
     with zipfile.ZipFile(marketplace_path) as archive:
         manifest = json.loads(
-            archive.read("document-injection-firewall-marketplace/marketplace.json")
+            archive.read("parsewall-marketplace/marketplace.json")
         )
+    assert marketplace_path.name == "parsewall-codex-marketplace-0.1.0.zip"
+    assert plugin_path.name == "parsewall-codex-plugin-0.1.0.zip"
+    assert manifest["name"] == "parsewall-local"
     entry = manifest["plugins"][0]
     assert entry["source"] == {
         "source": "local",

@@ -113,6 +113,15 @@ The distributable plugin is under `plugins/document-injection-firewall`. It
 contains the `inspect-untrusted-files` skill, a `PreToolUse` hook that blocks
 local raw-document reads, and an optional root-confined stdio MCP service.
 
+Install the PyPI command and the Git-backed marketplace, then start a new Codex
+task:
+
+```sh
+uv tool install parsewall==0.1.0
+codex plugin marketplace add gogooma125732/parsewall --ref main
+codex plugin add document-injection-firewall@parsewall
+```
+
 Codex's current `UserPromptSubmit` hook schema exposes prompt text but not an
 attachment list, so the hook cannot claim to intercept native attachment
 ingestion. It is a local-tool guardrail; the skill and MCP workflow remain the

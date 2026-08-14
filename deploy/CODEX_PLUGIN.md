@@ -1,11 +1,21 @@
 # Codex Plugin, Hook, and MCP
 
-Install the Python wheel first so `parsewall-mcp` is on the process
-`PATH`. Then extract the marketplace archive and register its root:
+Install Parsewall as an isolated Python tool so `parsewall-mcp` is on the
+process `PATH`. Add the GitHub repository as a Codex marketplace and install
+the plugin:
 
 ```sh
-codex plugin marketplace add /absolute/path/to/document-injection-firewall-marketplace
-codex plugin add document-injection-firewall@document-injection-firewall-local
+uv tool install parsewall==0.1.0
+codex plugin marketplace add gogooma125732/parsewall --ref main
+codex plugin add document-injection-firewall@parsewall
+```
+
+For an offline or pinned install, extract
+`parsewall-codex-marketplace-0.1.0.zip`, then use the extracted root instead:
+
+```sh
+codex plugin marketplace add /absolute/path/to/parsewall-marketplace
+codex plugin add document-injection-firewall@parsewall-local
 ```
 
 Start a new Codex task after installation. The plugin contains:
