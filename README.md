@@ -1,10 +1,29 @@
 <p align="center">
-  <img src="assets/parsewall-wordmark.png" alt="Parsewall" width="760">
+  <img src="assets/parsewall-logo.png" alt="Parsewall" width="560">
 </p>
 
-# Parsewall
+<h1 align="center">Parsewall</h1>
 
-**Make every file inert before it reaches the model.**
+<p align="center"><strong>Make every file inert before it reaches the model.</strong></p>
+
+<p align="center">
+  <img alt="Release v0.1.0" src="https://img.shields.io/badge/release-v0.1.0-EF4444?style=for-the-badge">
+  <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-F59E0B?style=for-the-badge&logo=python&logoColor=white">
+  <img alt="Docker Compose ready" src="https://img.shields.io/badge/docker-compose_ready-2496ED?style=for-the-badge&logo=docker&logoColor=white">
+</p>
+
+<p align="center">
+  <img alt="Fail closed" src="https://img.shields.io/badge/policy-fail_closed-DC2626?style=flat-square">
+  <img alt="Network-isolated worker" src="https://img.shields.io/badge/worker-network_isolated-7C3AED?style=flat-square">
+  <img alt="Fixed JSON result" src="https://img.shields.io/badge/output-fixed_JSON-0891B2?style=flat-square">
+</p>
+
+<p align="center">
+  <a href="#run-the-isolated-http-product">Quick start</a> ·
+  <a href="deploy/LOCAL_INSTALL.md">Local install</a> ·
+  <a href="deploy/OFFLINE_INSTALL.md">Offline install</a> ·
+  <a href="deploy/CODEX_PLUGIN.md">Codex plugin</a>
+</p>
 
 Parsewall is a deterministic, fail-closed pre-LLM scanner for untrusted
 uploaded documents.
