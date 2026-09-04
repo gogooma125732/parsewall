@@ -1,0 +1,34 @@
+name: Parsewall document security scan
+description: Fail-closed scanning for prompt injection and suspicious document content
+author: Parsewall maintainers
+
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  input:
+    description: Path to the document to scan, relative to the repository workspace
+    required: true
+  fail-on:
+    description: Minimum risk level that makes the action fail (low, review, or quarantine)
+    required: false
+    default: quarantine
+
+outputs:
+  risk-level:
+    description: The resulting risk level (low, review, or quarantine)
+    value: ${{ steps.scan.outputs.risk-level }}
+  result:
+    description: The fixed Parsewall JSON result contract
+    value: ${{ steps.scan.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        PARSEWALL_INPUT: ${{ inputs.input }}
+        PARSEWALL_FAIL_ON: ${{ inputs.fail-on }}
+      run: bash "${{ github.action_path }}/action/scan.sh"

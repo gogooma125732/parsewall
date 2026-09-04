@@ -55,6 +55,25 @@ The package also installs `parsewall-api`, `parsewall-worker`, and
 `parsewall-mcp`. The original `document-firewall*` commands remain available as
 compatibility aliases.
 
+## Use as a GitHub Action
+
+Scan a checked-out document in a workflow. The action fails when the result
+reaches the configured `fail-on` level (`quarantine` by default).
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - uses: gogooma125732/parsewall@v1
+    id: parsewall
+    with:
+      input: path/to/document.pdf
+      fail-on: review
+  - run: echo "risk=${{ steps.parsewall.outputs.risk-level }}"
+```
+
+The action installs Parsewall in the runner environment and emits the fixed
+JSON result contract as an output.
+
 ## Run the isolated HTTP product
 
 ```sh

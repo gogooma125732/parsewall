@@ -1,0 +1,23 @@
+name: Test GitHub Action
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        id: scan
+        with:
+          input: tests/fixtures/clean.txt
+          fail-on: quarantine
+      - name: Check outputs
+        env:
+          RISK_LEVEL: ${{ steps.scan.outputs.risk-level }}
+        run: test "$RISK_LEVEL" = low
