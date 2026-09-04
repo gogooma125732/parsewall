@@ -7,7 +7,7 @@
 <p align="center"><strong>Make every file inert before it reaches the model.</strong></p>
 
 <p align="center">
-  <img alt="Release v0.1.0" src="https://img.shields.io/badge/release-v0.1.0-EF4444?style=for-the-badge">
+  <img alt="Release v1.0.0" src="https://img.shields.io/badge/release-v1.0.0-EF4444?style=for-the-badge">
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-F59E0B?style=for-the-badge&logo=python&logoColor=white">
   <img alt="Docker Compose ready" src="https://img.shields.io/badge/docker-compose_ready-2496ED?style=for-the-badge&logo=docker&logoColor=white">
 </p>
@@ -136,7 +136,7 @@ Install the PyPI command and the Git-backed marketplace, then start a new Codex
 task:
 
 ```sh
-uv tool install parsewall==0.1.0
+uv tool install parsewall==1.0.0
 codex plugin marketplace add gogooma125732/parsewall --ref main
 codex plugin add document-injection-firewall@parsewall
 ```

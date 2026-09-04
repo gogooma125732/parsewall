@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "parsewall"
-version = "0.1.0"
+version = "1.0.0"
 description = "Fail-closed document inspection before untrusted files reach an LLM"
 readme = "README.md"
 authors = [{ name = "Parsewall maintainers" }]

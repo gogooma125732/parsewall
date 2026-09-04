@@ -5,13 +5,13 @@ process `PATH`. Add the GitHub repository as a Codex marketplace and install
 the plugin:
 
 ```sh
-uv tool install parsewall==0.1.0
+uv tool install parsewall==1.0.0
 codex plugin marketplace add gogooma125732/parsewall --ref main
 codex plugin add document-injection-firewall@parsewall
 ```
 
 For an offline or pinned install, extract
-`parsewall-codex-marketplace-0.1.0.zip`, then use the extracted root instead:
+`parsewall-codex-marketplace-1.0.0.zip`, then use the extracted root instead:
 
 ```sh
 codex plugin marketplace add /absolute/path/to/parsewall-marketplace

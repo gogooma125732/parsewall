@@ -1,6 +1,6 @@
 services:
   api:
-    image: ${DIF_IMAGE:-document-injection-firewall:0.1.0}
+    image: ${DIF_IMAGE:-document-injection-firewall:1.0.0}
     pull_policy: never
     init: true
     environment:
@@ -35,7 +35,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: ${DIF_IMAGE:-document-injection-firewall:0.1.0}
+    image: ${DIF_IMAGE:-document-injection-firewall:1.0.0}
     pull_policy: never
     init: true
     entrypoint: ["document-firewall-worker"]
