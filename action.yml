@@ -1,4 +1,4 @@
-name: Parsewall document security scan
+name: Parsewall
 description: Fail-closed scanning for prompt injection and suspicious document content
 author: Parsewall maintainers
 
