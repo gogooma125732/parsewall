@@ -88,10 +88,10 @@ def test_compose_release_archive_contains_one_command_installer(tmp_path: Path) 
         text=True,
     )
     assert completed.returncode == 0, completed.stderr
-    archive_path = next((tmp_path / "0.1.0").glob("*-compose.tar.gz"))
+    archive_path = next((tmp_path / "1.0.0").glob("*-compose.tar.gz"))
     with tarfile.open(archive_path, "r:gz") as archive:
         names = set(archive.getnames())
-    prefix = "document-injection-firewall-0.1.0"
+    prefix = "document-injection-firewall-1.0.0"
     assert f"{prefix}/compose.yaml" in names
     assert f"{prefix}/scripts/install-local.sh" in names
     assert f"{prefix}/scripts/verify-local.sh" in names
@@ -116,7 +116,7 @@ def test_codex_release_contains_plugin_hook_mcp_and_marketplace_policy(
         text=True,
     )
     assert completed.returncode == 0, completed.stderr
-    output = tmp_path / "0.1.0"
+    output = tmp_path / "1.0.0"
     plugin_path = next(output.glob("*-codex-plugin-*.zip"))
     marketplace_path = next(output.glob("*-codex-marketplace-*.zip"))
 
@@ -133,8 +133,8 @@ def test_codex_release_contains_plugin_hook_mcp_and_marketplace_policy(
         manifest = json.loads(
             archive.read("parsewall-marketplace/marketplace.json")
         )
-    assert marketplace_path.name == "parsewall-codex-marketplace-0.1.0.zip"
-    assert plugin_path.name == "parsewall-codex-plugin-0.1.0.zip"
+    assert marketplace_path.name == "parsewall-codex-marketplace-1.0.0.zip"
+    assert plugin_path.name == "parsewall-codex-plugin-1.0.0.zip"
     assert manifest["name"] == "parsewall-local"
     entry = manifest["plugins"][0]
     assert entry["source"] == {

@@ -12,7 +12,7 @@
 ./scripts/install-local.sh
 ```
 
-The installer creates a private `.env`, builds the pinned `0.1.0` image, starts
+The installer creates a private `.env`, builds the pinned `1.0.0` image, starts
 the API and network-disabled worker, then verifies the security-critical
 container settings. Open `http://127.0.0.1:8000/` after it passes.
 

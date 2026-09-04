@@ -2,7 +2,7 @@
 
 This plugin adds the `inspect-untrusted-files` skill, a fail-closed
 `PreToolUse` hook, and a local stdio MCP server. Install the matching Python
-package with `uv tool install parsewall==0.1.0` first so `parsewall-mcp` is
+package with `uv tool install parsewall==1.0.0` first so `parsewall-mcp` is
 available on `PATH`.
 
 The MCP service reads only files under `DIF_MCP_INPUT_ROOT` (or its working

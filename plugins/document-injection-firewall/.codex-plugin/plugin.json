@@ -1,6 +1,6 @@
 {
   "name": "document-injection-firewall",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Fail-closed inspection before Codex reads untrusted documents",
   "author": {
     "name": "Parsewall maintainers"

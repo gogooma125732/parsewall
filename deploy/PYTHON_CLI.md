@@ -19,7 +19,7 @@ Install the wheel in a dedicated Python 3.11+ environment. For example:
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install parsewall-0.1.0-py3-none-any.whl
+python -m pip install parsewall-1.0.0-py3-none-any.whl
 parsewall scan --input ./report.txt
 ```
 

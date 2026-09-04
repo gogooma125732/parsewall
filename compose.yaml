@@ -1,7 +1,7 @@
 services:
   api:
     build: .
-    image: ${DIF_IMAGE:-document-injection-firewall:0.1.0}
+    image: ${DIF_IMAGE:-document-injection-firewall:1.0.0}
     init: true
     environment:
       DIF_JOB_STORE: /var/lib/dif/jobs
@@ -35,7 +35,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: ${DIF_IMAGE:-document-injection-firewall:0.1.0}
+    image: ${DIF_IMAGE:-document-injection-firewall:1.0.0}
     init: true
     entrypoint: ["document-firewall-worker"]
     command: ["--store", "/var/lib/dif/jobs", "--interval", "0.5"]
